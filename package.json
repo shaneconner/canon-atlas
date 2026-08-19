@@ -1,0 +1,46 @@
+{
+  "name": "canon-atlas",
+  "version": "0.1.0",
+  "description": "An atlas over a catalog of markdown documents that reference each other: a constellation graph, search, a reader, and local editing. Agnostic to what wrote the catalog.",
+  "type": "module",
+  "bin": {
+    "canon-atlas": "src/cli.mjs"
+  },
+  "exports": {
+    ".": "./src/build.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "vendor",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node tests/verify.mjs"
+  },
+  "keywords": [
+    "knowledge-graph",
+    "constellation",
+    "markdown",
+    "wiki",
+    "memory",
+    "agent-memory",
+    "llm-wiki",
+    "visualization",
+    "d3",
+    "pi-canon",
+    "obsidian"
+  ],
+  "author": "Shane Conner",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shaneconner/canon-atlas.git"
+  },
+  "bugs": "https://github.com/shaneconner/canon-atlas/issues",
+  "homepage": "https://github.com/shaneconner/canon-atlas#readme"
+}

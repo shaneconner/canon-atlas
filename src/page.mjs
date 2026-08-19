@@ -39,6 +39,7 @@ export function buildData(config, graph, mode) {
       name: c.name,
       match: c.match,
       immutable: c.immutable,
+      reveal: c.reveal,
       count: counts.get(c.name) || 0,
     })),
     clusters,

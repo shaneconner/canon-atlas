@@ -40,6 +40,8 @@ To define your own, put a `canon-atlas.json` at the root:
 
 `match` is a directory prefix; the longest prefix claims a file. `fields` maps your frontmatter keys onto the ones the atlas reads: `title`, `tags`, `date`, `summary`, and `refs` (a frontmatter list of documents this one concerns, rendered as edges). Titles fall back to the first heading, then to the path. `immutable` marks a collection append-only and draws its documents as rings instead of spheres.
 
+`reveal` controls how much of a collection sits on the map: `"always"` (the default), `"focus"`, or `"off"`. A `focus` collection stays off the map and out of the layout until you select a document, when its neighbors from that collection bloom around it; searching also surfaces its matches. The collection's chip cycles through revealed-on-focus, shown in full at reduced weight, and hidden. The pi-canon preset marks the journal `focus`: a hundred immutable event entries are detail on demand, not weather. This is why a large corpus reads as a calm sky.
+
 References that resolve nowhere are not errors: they render as dashed, unwritten nodes, because a name the corpus reaches for but has not written yet is a fact worth seeing. In live mode an unwritten node offers to be written.
 
 ## Color

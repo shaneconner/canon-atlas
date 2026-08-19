@@ -26,6 +26,7 @@ const PI_CANON_PRESET = {
       name: "journal",
       match: "journal/",
       immutable: true,
+      reveal: "focus",
       fields: { date: "logged", refs: "subject" },
     },
   ],
@@ -44,15 +45,20 @@ function isDir(p) {
   }
 }
 
+const REVEALS = new Set(["always", "focus", "off"]);
+
 function normalizeCollection(c) {
   if (!c || typeof c.name !== "string" || !c.name) throw new Error("collection needs a name");
   let match = typeof c.match === "string" ? c.match : "";
   match = match.replace(/^\.?\//, "");
   if (match && !match.endsWith("/")) match += "/";
+  const reveal = c.reveal ?? "always";
+  if (!REVEALS.has(reveal)) throw new Error(`unknown reveal: ${reveal}`);
   return {
     name: c.name,
     match,
     immutable: !!c.immutable,
+    reveal,
     fields: { ...FIELD_DEFAULTS, ...(c.fields || {}) },
   };
 }

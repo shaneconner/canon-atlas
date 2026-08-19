@@ -189,15 +189,67 @@
       inOf[e.target].push({ id: e.source, via: e.via });
     });
 
-    var state = { hover: null, pinned: null, off: {}, cluster: null, query: "", k: 1, W: 0, H: 0, warmed: false };
+    var state = { hover: null, pinned: null, mode: {}, cluster: null, query: "", k: 1, W: 0, H: 0, warmed: false };
 
+    /* Reveal: a collection configured "focus" keeps its documents off the map
+       and out of the layout until their neighbor is pinned (or a search names
+       them), so an episodic tier reads as detail on demand rather than noise.
+       Its chip cycles focus, on (drawn soft), off. */
+    var revealDefault = { unwritten: "always" };
+    data.collections.forEach(function (c) { revealDefault[c.name] = c.reveal || "always"; });
+    Object.keys(revealDefault).forEach(function (k) {
+      state.mode[k] = revealDefault[k] === "always" ? "on" : revealDefault[k] === "off" ? "off" : "focus";
+    });
+    var hasFocus = Object.keys(revealDefault).some(function (k) { return revealDefault[k] !== "always"; });
+
+    /* An unwritten node named only by a waiting tier would float unexplained,
+       every edge that accounts for it hidden. It follows its referrers. */
+    G.nodes.forEach(function (n) {
+      if (n.exists) return;
+      var lists = outOf[n.id].concat(inOf[n.id]);
+      n._focusOrphan =
+        lists.length > 0 &&
+        lists.every(function (l) { return revealDefault[chipKey(G.nodes[l.id])] !== "always"; });
+    });
+
+    function chipKey(n) { return n.exists ? n.collection : "unwritten"; }
+    function pinAdjacent(n) {
+      return !!(state.pinned && (state.pinned === n || adj[state.pinned.id][n.id]));
+    }
     function nodeVisible(n) {
-      if (state.off[chipKey(n)]) return false;
+      var m = state.mode[chipKey(n)] || "on";
+      if (m === "off") return false;
+      if (m === "focus" && !pinAdjacent(n) && !(state.query && matches(n))) return false;
+      if (n._focusOrphan && !pinAdjacent(n) && !(state.query && matches(n))) {
+        var lists = outOf[n.id].concat(inOf[n.id]);
+        var anyVisible = lists.some(function (l) {
+          var d = G.nodes[l.id];
+          var dm = state.mode[chipKey(d)] || "on";
+          return dm === "on" || (dm === "focus" && (pinAdjacent(d) || (state.query && matches(d))));
+        });
+        if (!anyVisible) return false;
+      }
       if (state.cluster != null && n.cluster !== state.cluster) return false;
       return true;
     }
     function edgeVisible(e) { return nodeVisible(e.source) && nodeVisible(e.target); }
-    function chipKey(n) { return n.exists ? n.collection : "unwritten"; }
+    /* Layout membership: like visibility, but a search hit does not join the
+       simulation, it just shows in place, so typing does not shake the sky.
+       An isolated cluster must not gain invisible mass from a reveal either. */
+    function simActive(n) {
+      var m = state.mode[chipKey(n)] || "on";
+      if (m === "off") return false;
+      if (m === "focus") {
+        if (state.cluster != null && n.cluster !== state.cluster) return false;
+        return pinAdjacent(n);
+      }
+      return true;
+    }
+    /* A soft node is a whole revealed tier shown at once: present, lower weight. */
+    function soft(n) {
+      var k = chipKey(n);
+      return revealDefault[k] !== "always" && state.mode[k] === "on";
+    }
 
     function matches(n) {
       if (!state.query) return true;
@@ -220,14 +272,24 @@
       e._fo = (i * 0.6180339887) % 1;
     });
 
+    var linkForce = d3.forceLink(G.edges).id(function (d) { return d.id; })
+      .distance(function (e) { return EDGE[e.via].dist; })
+      .strength(function (e) { return EDGE[e.via].strength; });
     var sim = d3.forceSimulation(G.nodes)
-      .force("link", d3.forceLink(G.edges).id(function (d) { return d.id; })
-        .distance(function (e) { return EDGE[e.via].dist; })
-        .strength(function (e) { return EDGE[e.via].strength; }))
+      .force("link", linkForce)
       .force("charge", d3.forceManyBody().strength(-320).distanceMax(560))
       .force("collide", d3.forceCollide().radius(function (n) { return radius(n) + 11; }).strength(0.86))
       .on("tick", tick)
       .stop();
+
+    /* Rebind the simulation to the active set. Hidden tiers must not tug the
+       layout, or four articles would float in the empty space their hundred
+       hidden satellites reserve. */
+    function rebindSim(alpha) {
+      sim.nodes(G.nodes.filter(simActive));
+      linkForce.links(G.edges.filter(function (e) { return simActive(e.source) && simActive(e.target); }));
+      if (alpha) sim.alpha(alpha).restart();
+    }
 
     /* Each cluster gets an angle on a ring, so a theme becomes a region. An
        unclustered node is pulled gently to the middle instead. */
@@ -271,6 +333,9 @@
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pin(n); }
       })
       .call(d3.drag()
+        /* A node outside the simulation (a search-revealed satellite) would
+           ignore the pointer while the restart shakes everyone else. */
+        .filter(function (e, n) { return !e.ctrlKey && !e.button && simActive(n); })
         .on("start", function (e, n) {
           dragMoved = false;
           if (!e.active) sim.alphaTarget(0.2).restart();
@@ -366,6 +431,14 @@
         none: "No clusters yet: add links between documents, or provide embeddings, and regions will form.",
       }[data.basis];
       side.appendChild(el("p", "side-meta", basisLine + " Select a cluster to isolate it, or any node to read it."));
+      data.collections.forEach(function (c) {
+        if (state.mode[c.name] === "focus" && c.count) {
+          side.appendChild(el("p", "side-meta",
+            c.count + " " + c.name + " document" + (c.count === 1 ? "" : "s") +
+            " wait off the map; select a document to reveal the ones around it, or the " +
+            c.name + " chip to show them all."));
+        }
+      });
       if (data.clusters.length) {
         var key = el("div");
         data.clusters.forEach(function (c) {
@@ -379,8 +452,9 @@
           row.addEventListener("click", function (e) {
             e.stopPropagation();
             state.cluster = state.cluster === c.id ? null : c.id;
-            state.pinned = null;
-            sim.alpha(0.3).restart();
+            releasePin();
+            if (hasFocus) rebindSim(0.3);
+            else sim.alpha(0.3).restart();
             paint();
             renderOverview();
             fitToView(true);
@@ -586,8 +660,31 @@
 
     /* ── focus, zoom, fit ─────────────────────────────────────────────── */
 
+    /* Whether selecting this node changes layout membership: it is itself a
+       waiting tier member, or it has neighbors in one. Pins that reveal nothing
+       must not reheat the sky. */
+    function pinReveals(n) {
+      if (!hasFocus) return false;
+      if (revealDefault[chipKey(n)] !== "always") return true;
+      var lists = outOf[n.id].concat(inOf[n.id]);
+      for (var i = 0; i < lists.length; i++) {
+        var m = G.nodes[lists[i].id];
+        if (revealDefault[chipKey(m)] !== "always" && state.mode[chipKey(m)] === "focus") return true;
+      }
+      return false;
+    }
+    var revealedByPin = false;
     function pin(n) {
+      if (state.pinned && state.pinned !== n) { state.pinned.fx = null; state.pinned.fy = null; }
       state.pinned = n;
+      if (pinReveals(n)) {
+        /* Hold the selected node still while its satellites bloom, so the
+           centreOn transition lands where it aimed. */
+        n.fx = n.x;
+        n.fy = n.y;
+        revealedByPin = true;
+        rebindSim(0.35);
+      }
       paint();
       renderNode(n);
       centreOn(n);
@@ -599,9 +696,17 @@
       if (reduced()) svg.call(zoom.transform, t);
       else svg.transition().duration(650).ease(d3.easeCubicInOut).call(zoom.transform, t);
     }
+    function releasePin() {
+      if (state.pinned) { state.pinned.fx = null; state.pinned.fy = null; }
+      state.pinned = null;
+      if (revealedByPin) {
+        revealedByPin = false;
+        rebindSim(0.2);
+      }
+    }
     function clearPin() {
       if (!state.pinned) return;
-      state.pinned = null;
+      releasePin();
       paint();
       renderOverview();
     }
@@ -642,7 +747,7 @@
       }
 
       nodeSel.style("display", function (n) { return nodeVisible(n) ? null : "none"; })
-        .style("opacity", function (n) { return dimmed(n) ? 0.11 : 1; });
+        .style("opacity", function (n) { return dimmed(n) ? 0.11 : soft(n) ? 0.68 : 1; });
       haloSel.style("display", function (n) { return nodeVisible(n) ? null : "none"; })
         .style("opacity", function (n) { return dimmed(n) ? 0.02 : near ? 0.3 : 0.15; });
 
@@ -787,14 +892,24 @@
     var chipDefs = data.collections.map(function (c) { return c.name; });
     if (G.nodes.some(function (n) { return !n.exists; })) chipDefs.push("unwritten");
     chipDefs.forEach(function (name) {
-      var b = el("button", "chip is-on", name);
-      b.setAttribute("aria-pressed", "true");
+      var b = el("button", "chip", name);
+      function paintChip() {
+        var m = state.mode[name];
+        b.classList.toggle("is-on", m === "on");
+        b.classList.toggle("is-focus", m === "focus");
+        b.setAttribute("aria-pressed", m === "on" ? "true" : m === "focus" ? "mixed" : "false");
+        b.title =
+          m === "focus" ? name + ": revealed around the selected document" :
+          m === "on" ? name + ": shown" : name + ": hidden";
+      }
+      paintChip();
       b.addEventListener("click", function () {
-        state.off[name] = !state.off[name];
-        b.classList.toggle("is-on", !state.off[name]);
-        b.setAttribute("aria-pressed", String(!state.off[name]));
+        var cur = state.mode[name];
+        if (revealDefault[name] === "always") state.mode[name] = cur === "on" ? "off" : "on";
+        else state.mode[name] = cur === "focus" ? "on" : cur === "on" ? "off" : "focus";
+        paintChip();
         if (state.pinned && !nodeVisible(state.pinned)) clearPin();
-        sim.alpha(0.4).restart();
+        rebindSim(0.4);
         paint();
       });
       chipsHost.appendChild(b);
@@ -844,8 +959,8 @@
 
     var refit = document.getElementById("refit");
     function onRefit() {
-      state.pinned = null;
       state.cluster = null;
+      releasePin();
       paint();
       renderOverview();
       fitToView(true);
@@ -894,7 +1009,35 @@
     cleanup.push(function () { window.removeEventListener("resize", onResize); });
 
     size();
+    rebindSim();
     for (var i = 0; i < 520; i++) sim.tick();
+    /* A tier waiting on reveal never warmed, so park each such document beside
+       a settled neighbor it will bloom from; physics takes over on reveal. Two
+       passes let a satellite whose only neighbor is another satellite park
+       beside that neighbor's parked position, not its pre-warm one. The golden
+       angle keeps every parking spot distinct, because a search reveal shows
+       these positions verbatim with no collision force to separate stacks. */
+    (function () {
+      var parked = {};
+      var GOLDEN = 2.39996322972865;
+      for (var pass = 0; pass < 2; pass++) {
+        G.nodes.forEach(function (n) {
+          if (simActive(n) || parked[n.id]) return;
+          var lists = outOf[n.id].concat(inOf[n.id]);
+          var host = null;
+          for (var i = 0; i < lists.length && !host; i++) {
+            var m = G.nodes[lists[i].id];
+            if (simActive(m) || parked[m.id]) host = m;
+          }
+          if (!host && pass === 0) return;
+          var a = n.id * GOLDEN;
+          var r = 34 + (n.id % 9) * 6;
+          n.x = (host && host.x != null ? host.x : state.W / 2) + Math.cos(a) * r;
+          n.y = (host && host.y != null ? host.y : state.H / 2) + Math.sin(a) * r;
+          parked[n.id] = 1;
+        });
+      }
+    })();
     tick();
     measureLabels();
     renderOverview();

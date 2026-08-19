@@ -81,6 +81,8 @@ html, body {
 
 .chip.is-on { border-color: var(--green); color: var(--green-bright); }
 
+.chip.is-focus { border-color: var(--green); border-style: dashed; color: var(--text); }
+
 select.abtn { appearance: none; }
 
 #count { font-size: 0.75rem; color: var(--text-dim); white-space: nowrap; }

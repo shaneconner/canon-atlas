@@ -81,6 +81,8 @@ function corpus(name, files) {
   assert.equal(config.preset, "pi-canon");
   const journal = config.collections.find((c) => c.name === "journal");
   assert.equal(journal.immutable, true);
+  assert.equal(journal.reveal, "focus");
+  assert.equal(config.collections.find((c) => c.name === "articles").reveal, "always");
   assert.equal(collectionFor(config, "articles/x.md").name, "articles");
   assert.equal(collectionFor(config, "notes.md"), null);
   pass("a root holding articles/ and journal/ gets the pi-canon preset, journal immutable");
@@ -199,6 +201,31 @@ function corpus(name, files) {
   assert.equal(config.preset, "default");
   assert.equal(collectionFor(config, "anything.md").name, "notes");
   pass("a bare directory of markdown is one mutable collection");
+}
+
+{
+  const root = corpus("reveal", {
+    "canon-atlas.json": JSON.stringify({
+      collections: [
+        { name: "log", match: "log/", reveal: "focus" },
+        { name: "rest", match: "" },
+      ],
+    }),
+    "log/one.md": "# One\n",
+    "rest.md": "# Rest\n[[one]]\n",
+  });
+  const config = loadConfig(root);
+  assert.equal(config.collections.find((c) => c.name === "log").reveal, "focus");
+  assert.equal(config.collections.find((c) => c.name === "rest").reveal, "always");
+  const data = buildData(config, buildGraph(scanCorpus(root, config)), "chart");
+  assert.equal(data.collections.find((c) => c.name === "log").reveal, "focus");
+
+  const bad = corpus("reveal-bad", {
+    "canon-atlas.json": JSON.stringify({ collections: [{ name: "x", match: "", reveal: "sometimes" }] }),
+    "a.md": "# A\n",
+  });
+  assert.throws(() => loadConfig(bad), /unknown reveal/);
+  pass("reveal is a validated collection option and rides the wire data");
 }
 
 /* --- graph ---------------------------------------------------------------------- */

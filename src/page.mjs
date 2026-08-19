@@ -110,6 +110,9 @@ var DATA = ${scriptJson(data)};
 ${read("ui/labels.cjs")}
 </script>
 <script>
+${read("ui/resolve.cjs")}
+</script>
+<script>
 ${read("ui/app.js")}
 </script>
 </body>

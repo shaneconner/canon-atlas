@@ -10,20 +10,54 @@ const SKIP_DIRS = new Set([".git", "node_modules", ".obsidian", ".atlas"]);
 const WIKILINK_RE = /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g;
 const MDLINK_RE = /(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 
-/* Flat frontmatter: `key: value` lines between --- fences. Values are bare
-   scalars, quoted strings, or inline arrays. Indented lines belong to nested
-   structures this tool does not read; they pass through untouched. */
+/* Frontmatter between --- fences: `key: value` scalars and inline `[a, b]`
+   arrays, plus the block sequence form
+       tags:
+         - one
+         - two
+   which is how ordinary Obsidian and Markdown files write lists. A key whose
+   value is empty and is followed by indented `- item` lines takes them as its
+   array. Other nested structures this tool does not read pass through. */
 export function parseFrontmatter(text) {
   if (!text.startsWith("---")) return { meta: {}, body: text };
-  const end = text.indexOf("\n---", 3);
-  if (end < 0) return { meta: {}, body: text };
-  const head = text.slice(text.indexOf("\n") + 1, end);
-  const body = text.slice(text.indexOf("\n", end + 1) + 1);
+  const firstNl = text.indexOf("\n");
+  if (firstNl < 0) return { meta: {}, body: text };
+  const lines = text.slice(firstNl + 1).split("\n");
+  let close = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i] === "---" || lines[i] === "...") {
+      close = i;
+      break;
+    }
+  }
+  if (close < 0) return { meta: {}, body: text };
+  const body = lines.slice(close + 1).join("\n");
+  const head = lines.slice(0, close);
   const meta = {};
-  for (const line of head.split("\n")) {
-    const m = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
+  for (let i = 0; i < head.length; i++) {
+    const m = /^([A-Za-z0-9_-]+):[ \t]*(.*)$/.exec(head[i]);
     if (!m) continue;
-    meta[m[1]] = parseValue(m[2]);
+    const key = m[1];
+    const rest = m[2].trim();
+    if (rest) {
+      meta[key] = parseValue(rest);
+      continue;
+    }
+    // Empty value: gather any immediately following `- item` block sequence.
+    const items = [];
+    let j = i + 1;
+    for (; j < head.length; j++) {
+      const seq = /^[ \t]+-[ \t]+(.*)$/.exec(head[j]);
+      if (!seq) break;
+      const v = unquote(seq[1].trim());
+      if (v) items.push(v);
+    }
+    if (j > i + 1) {
+      meta[key] = items;
+      i = j - 1;
+    } else {
+      meta[key] = "";
+    }
   }
   return { meta, body };
 }
@@ -76,7 +110,9 @@ export function extractLinks(body) {
     if (/^[a-z][a-z0-9+.-]*:/i.test(t)) continue; // absolute URL schemes
     if (t.startsWith("#")) continue;
     if (!/\.(md|markdown)(#|$)/i.test(t)) continue;
-    out.push({ target: decodeURIComponent(t.split("#")[0]), via: "mdlink" });
+    // Pass the raw target; the resolver decodes it safely, so a malformed
+    // percent escape resolves to nothing instead of throwing mid-scan.
+    out.push({ target: t.split("#")[0], via: "mdlink" });
   }
   return out;
 }

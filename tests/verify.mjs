@@ -52,6 +52,28 @@ function corpus(name, files) {
   pass("a document without frontmatter is all body");
 }
 
+{
+  // The block sequence form, which ordinary Obsidian and Markdown files use.
+  const { meta, body } = parseFrontmatter(
+    "---\ntitle: Blocked\ntags:\n  - harness\n  - memory\nrefs:\n  - design/decision\nempty:\ntrailing: kept\n---\nThe body.\n"
+  );
+  assert.equal(meta.title, "Blocked");
+  assert.deepEqual(meta.tags, ["harness", "memory"]);
+  assert.deepEqual(meta.refs, ["design/decision"]);
+  assert.equal(meta.empty, "");
+  assert.equal(meta.trailing, "kept");
+  assert.equal(body, "The body.\n");
+  pass("frontmatter reads block sequences, so ordinary list tags and refs survive");
+}
+
+{
+  // A closing fence must be an exact line; a rule inside the body does not end it.
+  const { meta, body } = parseFrontmatter("---\ntitle: T\n---\nBody with a --- rule below\n\n---\ntail\n");
+  assert.equal(meta.title, "T");
+  assert.ok(body.startsWith("Body with a --- rule"));
+  pass("only an exact fence line closes the frontmatter");
+}
+
 /* --- link extraction ------------------------------------------------------------ */
 
 {
@@ -66,6 +88,19 @@ function corpus(name, files) {
   );
   assert.equal(links[3].via, "mdlink");
   pass("wikilinks, aliases, sections, and relative md links extract; code and URLs do not");
+}
+
+{
+  // A malformed percent escape in a link target must not crash the scan.
+  const root = corpus("badescape", {
+    "a.md": "# A\n[bad](bad%ZZ.md) and [[b]]\n",
+    "b.md": "# B\n",
+  });
+  const g = buildGraph(scanCorpus(root, loadConfig(root)));
+  const a = g.nodes.find((n) => n.title === "A");
+  const outs = g.edges.filter((e) => e.source === a.id).map((e) => g.nodes[e.target].title);
+  assert.deepEqual(outs, ["B"]); // the bad target resolves to nothing, [[b]] still lands
+  pass("a malformed percent escape resolves to nothing instead of aborting the scan");
 }
 
 /* --- config --------------------------------------------------------------------- */
@@ -100,7 +135,7 @@ function corpus(name, files) {
   const graph = buildGraph(docs);
   const edge = graph.edges.find((e) => e.via === "ref");
   assert.equal(graph.nodes[edge.target].address, "lab/evolving-canon");
-  const wl = graph.edges.find((e) => e.via === "wikilink");
+  const wl = graph.edges.find((e) => e.via === "link");
   assert.equal(graph.nodes[wl.target].address, "pi-canon/design_decisions");
   pass("refs and wikilinks resolve across collections by address");
 }
@@ -260,6 +295,74 @@ function corpus(name, files) {
   assert.deepEqual(r1, r2);
   assert.ok(r1[2] > r1[0]);
   pass("pagerank is deterministic and flows toward the pointed-at");
+}
+
+{
+  // A basename two documents share must not resolve to a coin-flip winner.
+  const root = corpus("ambiguous", {
+    "a/index.md": "# A index\n",
+    "b/index.md": "# B index\n",
+    "hub.md": "# Hub\nSee [[index]] and [[a/index]].\n",
+  });
+  const g = buildGraph(scanCorpus(root, loadConfig(root)));
+  const hub = g.nodes.find((n) => n.title === "Hub");
+  const targets = g.edges.filter((e) => e.source === hub.id).map((e) => g.nodes[e.target].path).sort();
+  // [[index]] is ambiguous, so it forms no edge and no phantom; [[a/index]] is
+  // an exact path and resolves.
+  assert.deepEqual(targets, ["a/index.md"]);
+  assert.ok(!g.nodes.some((n) => !n.exists && n.title === "index"), "an ambiguous name must not become a phantom");
+  pass("an ambiguous name resolves to no edge, not a silent winner");
+}
+
+{
+  // A relative link that walks above the corpus resolves to nothing rather than
+  // clamping onto an unrelated root document.
+  const root = corpus("relesc", {
+    "x.md": "# X root\n",
+    "deep/here.md": "# Here\n[up two](../../x.md) and [up one](../x.md)\n",
+  });
+  const g = buildGraph(scanCorpus(root, loadConfig(root)));
+  const here = g.nodes.find((n) => n.title === "Here");
+  const outs = g.edges.filter((e) => e.source === here.id).map((e) => g.nodes[e.target].path);
+  // ../x.md from deep/here.md is root x.md and resolves; ../../x.md escapes.
+  assert.deepEqual(outs, ["x.md"]);
+  pass("a relative link above the corpus root resolves to nothing, never clamps");
+}
+
+{
+  // Body links and a frontmatter ref between the same pair are two relations,
+  // so both survive; two identical body links collapse to one.
+  const root = corpus("dualkind", {
+    "canon-atlas.json": JSON.stringify({
+      collections: [{ name: "art", match: "art/", fields: { refs: "refs" } }],
+    }),
+    "art/a.md": "---\nrefs:\n  - b\n---\n# A\n[[b]] [[b]]\n",
+    "art/b.md": "# B\n",
+  });
+  const g = buildGraph(scanCorpus(root, loadConfig(root)));
+  const a = g.nodes.find((n) => n.title === "A");
+  const kinds = g.edges.filter((e) => e.source === a.id).map((e) => e.via).sort();
+  assert.deepEqual(kinds, ["link", "ref"]);
+  pass("a link and a ref between one pair both survive; identical links dedupe");
+}
+
+{
+  // Reader resolution must agree with the edge the graph drew, through the one
+  // shared resolver.
+  const { createRequire } = await import("node:module");
+  const { buildIndex, resolveLink, AMBIGUOUS } = createRequire(import.meta.url)("../src/ui/resolve.cjs");
+  const docs = [
+    { path: "a/index.md", address: "a/index", title: "A index" },
+    { path: "b/index.md", address: "b/index", title: "B index" },
+    { path: "solo.md", address: "solo", title: "Solo" },
+  ];
+  const idx = buildIndex(docs);
+  assert.equal(resolveLink(idx, "hub.md", "index", "wikilink"), AMBIGUOUS);
+  assert.equal(resolveLink(idx, "hub.md", "solo", "wikilink").path, "solo.md");
+  assert.equal(resolveLink(idx, "a/note.md", "../solo.md", "mdlink").path, "solo.md");
+  assert.equal(resolveLink(idx, "a/note.md", "../../solo.md", "mdlink"), null);
+  assert.equal(resolveLink(idx, "hub.md", "missing", "wikilink"), null);
+  pass("the shared resolver is unique on aliases and rejects above-root traversal");
 }
 
 /* --- clusters ------------------------------------------------------------------- */

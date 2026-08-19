@@ -1,50 +1,18 @@
 /* Link graph: resolve every authored link against the scanned corpus, keep the
    ones that land, and surface the ones that do not as phantom nodes, because a
-   dangling reference is a fact about the corpus rather than an error. */
+   dangling reference is a fact about the corpus rather than an error. Resolution
+   runs through the shared resolver the reader also uses, so an edge the graph
+   draws is a link the reader can follow. */
 
-function normalizeRel(baseDir, target) {
-  const parts = (baseDir ? baseDir.split("/") : []).concat(target.split("/"));
-  const out = [];
-  for (const p of parts) {
-    if (!p || p === ".") continue;
-    if (p === "..") out.pop();
-    else out.push(p);
-  }
-  return out.join("/");
-}
+import { createRequire } from "node:module";
+const { AMBIGUOUS, buildIndex, resolveLink } = createRequire(import.meta.url)("./ui/resolve.cjs");
 
-function buildIndex(docs) {
-  const byPath = new Map(); // root-relative path minus extension
-  const byAddress = new Map();
-  const byName = new Map(); // lowercase basename
-  const byTitle = new Map();
-  const claim = (map, key, doc) => {
-    if (!key) return;
-    if (!map.has(key)) map.set(key, doc);
-  };
-  for (const d of docs) {
-    claim(byPath, d.path.replace(/\.(md|markdown)$/i, ""), d);
-    claim(byAddress, d.address, d);
-    claim(byName, d.address.split("/").pop().toLowerCase(), d);
-    claim(byTitle, d.title.toLowerCase(), d);
-  }
-  return { byPath, byAddress, byName, byTitle };
-}
-
-function resolve(index, doc, link) {
-  const t = link.target.replace(/\.(md|markdown)$/i, "");
-  if (link.via === "mdlink") {
-    const dir = doc.path.includes("/") ? doc.path.slice(0, doc.path.lastIndexOf("/")) : "";
-    const abs = normalizeRel(dir, t);
-    return index.byPath.get(abs) || index.byPath.get(t) || null;
-  }
-  return (
-    index.byPath.get(t) ||
-    index.byAddress.get(t) ||
-    index.byName.get(t.toLowerCase()) ||
-    index.byTitle.get(t.toLowerCase()) ||
-    null
-  );
+/* Two authored link kinds render identically (a plain link), so they collapse
+   to one edge kind; a frontmatter ref stays distinct. Both survive between the
+   same pair, because a document that links to and also refers to another states
+   two different relations. */
+function edgeVia(via) {
+  return via === "ref" ? "ref" : "link";
 }
 
 export function pagerank(n, outLinks, damping = 0.85, iters = 50) {
@@ -82,9 +50,12 @@ export function buildGraph(docs) {
   for (const d of docs) {
     const from = idOf.get(d.path);
     for (const link of d.links) {
-      const hit = resolve(index, d, link);
+      const hit = resolveLink(index, d.path, link.target, link.via);
       let to;
-      if (hit) {
+      if (hit === AMBIGUOUS) {
+        // A name two documents share resolves to neither: no invented edge.
+        continue;
+      } else if (hit) {
         to = idOf.get(hit.path);
       } else {
         if (link.via === "mdlink") continue; // a broken file path is noise, not a phantom
@@ -108,10 +79,11 @@ export function buildGraph(docs) {
         to = phantoms.get(key);
       }
       if (to === from || to == null) continue;
-      const key = from + ">" + to;
+      const via = edgeVia(link.via);
+      const key = from + ">" + to + ">" + via;
       if (edgeSet.has(key)) continue;
       edgeSet.add(key);
-      edges.push({ source: from, target: to, via: link.via });
+      edges.push({ source: from, target: to, via });
     }
   }
 

@@ -12,11 +12,11 @@ function inline(s) {
   out = out.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
   out = out.replace(
     /\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g,
-    (_, t, alias) => `<a class="wl" data-target="${t.trim()}">${alias ? alias.trim() : t.trim()}</a>`
+    (_, t, alias) => `<a class="wl" data-via="wikilink" data-target="${t.trim()}">${alias ? alias.trim() : t.trim()}</a>`
   );
   out = out.replace(/(?<!!)\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)/g, (_, text, href) => {
     if (/^https?:/i.test(href)) return `<a href="${href}" target="_blank" rel="noopener">${text || href}</a>`;
-    if (/\.(md|markdown)(#|$)/i.test(href)) return `<a class="wl" data-target="${href.split("#")[0]}">${text || href}</a>`;
+    if (/\.(md|markdown)(#|$)/i.test(href)) return `<a class="wl" data-via="mdlink" data-target="${href.split("#")[0]}">${text || href}</a>`;
     return text || href;
   });
   out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");

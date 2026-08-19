@@ -65,12 +65,11 @@
     return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
   var EDGE = {
-    wikilink: { dash: "7 5", dist: 118, strength: 0.3, base: 0.5, w: 1.1 },
-    mdlink: { dash: "7 5", dist: 118, strength: 0.3, base: 0.5, w: 1.1 },
+    link: { dash: "7 5", dist: 118, strength: 0.3, base: 0.5, w: 1.1 },
     ref: { dash: "3 3", dist: 56, strength: 0.6, base: 0.4, w: 1 },
   };
-  var VERB = { wikilink: "links to", mdlink: "links to", ref: "refers to" };
-  var INVERSE = { wikilink: "linked from", mdlink: "linked from", ref: "referred to by" };
+  var VERB = { link: "links to", ref: "refers to" };
+  var INVERSE = { link: "linked from", ref: "referred to by" };
 
   var stage = document.getElementById("stage");
   var side = document.getElementById("side");
@@ -499,10 +498,11 @@
       }
     }
 
-    function wireDocLinks(container) {
+    function wireDocLinks(container, sourceNode) {
       container.querySelectorAll("a.wl").forEach(function (a) {
         var t = a.getAttribute("data-target") || "";
-        var hit = G.resolve(t);
+        var via = a.getAttribute("data-via") || "wikilink";
+        var hit = G.resolve(t, sourceNode ? sourceNode.path : "", via);
         if (hit) {
           a.addEventListener("click", function (e) { e.preventDefault(); pin(hit); });
         } else {
@@ -576,7 +576,7 @@
         var doc = el("div", "doc");
         doc.innerHTML = n.html;
         side.appendChild(doc);
-        wireDocLinks(doc);
+        wireDocLinks(doc, n);
       }
       var outs = outOf[n.id], ins = inOf[n.id];
       if (outs.length) {
@@ -1075,20 +1075,12 @@
       }
     });
     strip.innerHTML = "";
-    var byPath = {}, byAddress = {}, byName = {}, byTitle = {};
-    nodes.forEach(function (n) {
-      if (!n.exists) return;
-      var noExt = n.path.replace(/\.(md|markdown)$/i, "");
-      if (byPath[noExt] == null) byPath[noExt] = n;
-      if (byAddress[n.address] == null) byAddress[n.address] = n;
-      var name = n.address.split("/").pop().toLowerCase();
-      if (byName[name] == null) byName[name] = n;
-      var title = n.title.toLowerCase();
-      if (byTitle[title] == null) byTitle[title] = n;
-    });
-    function resolve(target) {
-      var t = target.replace(/\.(md|markdown)$/i, "");
-      return byPath[t] || byAddress[t] || byName[t.toLowerCase()] || byTitle[t.toLowerCase()] || null;
+    /* The same resolver the server built the edges with, so a reader link
+       lands exactly where its edge points, or is dead where the edge is. */
+    var index = AtlasResolve.buildIndex(nodes.filter(function (n) { return n.exists; }));
+    function resolve(target, sourcePath, via) {
+      var hit = AtlasResolve.resolveLink(index, sourcePath || "", target, via || "wikilink");
+      return hit && hit !== AtlasResolve.AMBIGUOUS ? hit : null;
     }
     return { nodes: nodes, edges: data.edges, resolve: resolve };
   }

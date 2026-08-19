@@ -362,7 +362,56 @@ function corpus(name, files) {
   assert.equal(resolveLink(idx, "a/note.md", "../solo.md", "mdlink").path, "solo.md");
   assert.equal(resolveLink(idx, "a/note.md", "../../solo.md", "mdlink"), null);
   assert.equal(resolveLink(idx, "hub.md", "missing", "wikilink"), null);
+  // A target that names an Object.prototype member must not match an inherited
+  // property; the lookup tables carry no prototype.
+  for (const magic of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__"]) {
+    assert.equal(resolveLink(idx, "hub.md", magic, "wikilink"), null, `${magic} must not resolve`);
+  }
+  // A leading-slash root-relative target still folds . and .. segments.
+  assert.equal(resolveLink(idx, "deep/note.md", "/solo.md", "mdlink").path, "solo.md");
+  assert.equal(resolveLink(idx, "deep/note.md", "/a/../solo.md", "mdlink").path, "solo.md");
   pass("the shared resolver is unique on aliases and rejects above-root traversal");
+}
+
+{
+  // A magic-word reference is still an honest dangling reference: it forms a
+  // phantom, not a silent nothing and not a junk built-in.
+  const root = corpus("magicref", {
+    "a.md": "# A\nSee [[constructor]] and [[toString]].\n",
+  });
+  const g = buildGraph(scanCorpus(root, loadConfig(root)));
+  const phantoms = g.nodes.filter((n) => !n.exists).map((n) => n.title).sort();
+  assert.deepEqual(phantoms, ["constructor", "toString"]);
+  const a = g.nodes.find((n) => n.title === "A");
+  assert.equal(g.edges.filter((e) => e.source === a.id).length, 2);
+  pass("a reference named like a built-in is a phantom, not a prototype hit");
+}
+
+{
+  // foo.md and foo.markdown strip to the same key, so it is ambiguous, not a
+  // silent last-writer-wins.
+  const { createRequire } = await import("node:module");
+  const { buildIndex, resolveLink, AMBIGUOUS } = createRequire(import.meta.url)("../src/ui/resolve.cjs");
+  const idx = buildIndex([
+    { path: "foo.md", address: "foo", title: "Foo one" },
+    { path: "foo.markdown", address: "foo2", title: "Foo two" },
+  ]);
+  assert.equal(resolveLink(idx, "x.md", "foo", "wikilink"), AMBIGUOUS);
+  pass("two files that strip to one path key are ambiguous, not last-wins");
+}
+
+{
+  // A CRLF-authored document still has its frontmatter parsed and stripped.
+  const crlf = "---\r\ntitle: Hello\r\ntags:\r\n  - a\r\n  - b\r\n---\r\nBody line one\r\nsecond\r\n";
+  const { meta, body } = parseFrontmatter(crlf);
+  assert.equal(meta.title, "Hello");
+  assert.deepEqual(meta.tags, ["a", "b"]);
+  assert.ok(body.startsWith("Body line one"));
+  assert.ok(!body.includes("title:"));
+  // A column-zero block sequence is also read.
+  const flat = parseFrontmatter("---\ntags:\n- one\n- two\n---\nBody\n");
+  assert.deepEqual(flat.meta.tags, ["one", "two"]);
+  pass("frontmatter survives CRLF line endings and column-zero sequences");
 }
 
 /* --- clusters ------------------------------------------------------------------- */

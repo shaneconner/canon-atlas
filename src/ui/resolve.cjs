@@ -26,13 +26,17 @@ var AtlasResolve = (function () {
     }
   }
 
-  /* Resolve target against a source directory. A leading slash is root-relative;
-     otherwise walk from the source dir, and return null if a `..` escapes the
-     root instead of clamping to it. */
+  /* Resolve target against a source directory, folding `.` and `..`. A leading
+     slash is root-relative (walked from the root); otherwise walk from the
+     source dir. Return null if a `..` escapes the root instead of clamping. */
   function relPath(baseDir, target) {
-    if (target.charAt(0) === "/") return target.replace(/^\/+/, "");
-    var out = baseDir ? baseDir.split("/") : [];
-    out = out.slice();
+    var out;
+    if (target.charAt(0) === "/") {
+      out = [];
+      target = target.replace(/^\/+/, "");
+    } else {
+      out = baseDir ? baseDir.split("/") : [];
+    }
     var parts = target.split("/");
     for (var i = 0; i < parts.length; i++) {
       var p = parts[i];
@@ -45,20 +49,27 @@ var AtlasResolve = (function () {
     return out.join("/");
   }
 
+  /* Bare {} would let a target like "constructor" or "toString" match an
+     inherited Object.prototype member, so every lookup table has a null
+     prototype and no inherited keys. */
+  function table() {
+    return Object.create(null);
+  }
+  function claim(map, key, entry) {
+    if (!key) return;
+    if (!(key in map)) map[key] = entry;
+    else if (map[key] !== entry) map[key] = AMBIGUOUS;
+  }
+
   function buildIndex(entries) {
-    var byPath = {};
-    var byAddress = {};
-    var byName = {};
-    var byTitle = {};
-    function claim(map, key, entry) {
-      if (!key) return;
-      if (!(key in map)) map[key] = entry;
-      else if (map[key] !== entry) map[key] = AMBIGUOUS;
-    }
+    var byPath = table();
+    var byAddress = table();
+    var byName = table();
+    var byTitle = table();
     for (var i = 0; i < entries.length; i++) {
       var e = entries[i];
-      // Paths are unique, so byPath never becomes ambiguous.
-      byPath[stripExt(e.path)] = e;
+      // foo.md and foo.markdown strip to the same key, so byPath is claimed too.
+      claim(byPath, stripExt(e.path), e);
       claim(byAddress, e.address, e);
       claim(byName, e.address.split("/").pop().toLowerCase(), e);
       claim(byTitle, (e.title || "").toLowerCase(), e);

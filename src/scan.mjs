@@ -22,7 +22,10 @@ export function parseFrontmatter(text) {
   if (!text.startsWith("---")) return { meta: {}, body: text };
   const firstNl = text.indexOf("\n");
   if (firstNl < 0) return { meta: {}, body: text };
-  const lines = text.slice(firstNl + 1).split("\n");
+  // Parse on lines with any trailing CR removed, but slice the body from the
+  // original text so a CRLF document keeps its line endings.
+  const rawLines = text.slice(firstNl + 1).split("\n");
+  const lines = rawLines.map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
   let close = -1;
   for (let i = 0; i < lines.length; i++) {
     if (lines[i] === "---" || lines[i] === "...") {
@@ -31,7 +34,7 @@ export function parseFrontmatter(text) {
     }
   }
   if (close < 0) return { meta: {}, body: text };
-  const body = lines.slice(close + 1).join("\n");
+  const body = rawLines.slice(close + 1).join("\n");
   const head = lines.slice(0, close);
   const meta = {};
   for (let i = 0; i < head.length; i++) {
@@ -43,11 +46,12 @@ export function parseFrontmatter(text) {
       meta[key] = parseValue(rest);
       continue;
     }
-    // Empty value: gather any immediately following `- item` block sequence.
+    // Empty value: gather any immediately following `- item` block sequence,
+    // indented or at column zero, both of which are valid YAML.
     const items = [];
     let j = i + 1;
     for (; j < head.length; j++) {
-      const seq = /^[ \t]+-[ \t]+(.*)$/.exec(head[j]);
+      const seq = /^[ \t]*-[ \t]+(.*)$/.exec(head[j]);
       if (!seq) break;
       const v = unquote(seq[1].trim());
       if (v) items.push(v);

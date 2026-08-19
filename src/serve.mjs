@@ -3,10 +3,25 @@
 
    Write rules follow the collections: a mutable collection takes create, edit,
    and delete; an immutable collection is append-only, so it takes create and
-   nothing else. Every path is confined to the corpus root. */
+   nothing else. Every path is confined to the corpus root, and confinement is
+   real: a symlink pointing out of the tree, or a symlinked alias onto another
+   collection, is refused rather than followed. Because the page inlines the
+   whole corpus and the API mutates it, the browser is kept off the door too:
+   loopback Host, same-origin Origin, and a JSON content type are required, so a
+   hostile page cannot drive the API by DNS rebinding or a simple cross-site
+   POST. */
 
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { loadConfig, loadVectors, collectionFor } from "./config.mjs";
 import { scanCorpus } from "./scan.mjs";
@@ -14,10 +29,13 @@ import { buildGraph } from "./graph.mjs";
 import { buildData, renderPage } from "./page.mjs";
 
 const CACHE_TTL_MS = 3000;
+const BODY_LIMIT = 4_000_000;
 
 export function serve(rootArg, port = 4747) {
-  const root = resolve(rootArg || ".");
-  if (!existsSync(root)) throw new Error(`no such directory: ${root}`);
+  if (!existsSync(resolve(rootArg || "."))) throw new Error(`no such directory: ${resolve(rootArg || ".")}`);
+  // Canonicalize once: every confinement check compares against the real root,
+  // so a symlinked ancestor cannot smuggle a path back inside lexically.
+  const root = realpathSync(resolve(rootArg || "."));
 
   let cache = null;
   function data() {
@@ -34,7 +52,15 @@ export function serve(rootArg, port = 4747) {
   }
   const bust = () => (cache = null);
 
-  /* A client path is only ever a root-relative markdown file inside the tree. */
+  function httpError(status, message) {
+    const e = new Error(message);
+    e.status = status;
+    return e;
+  }
+
+  /* A client path is only ever a root-relative markdown file inside the tree,
+     reached without crossing a symlink. Lexical checks run first, then every
+     existing segment is lstat-ed so a link is refused before it is followed. */
   function confine(rel) {
     if (typeof rel !== "string" || !rel) throw httpError(400, "path required");
     if (!/\.(md|markdown)$/i.test(rel)) throw httpError(400, "path must end in .md");
@@ -45,25 +71,60 @@ export function serve(rootArg, port = 4747) {
     }
     const full = join(root, norm);
     if (!(full + sep).startsWith(root + sep)) throw httpError(400, "path escapes the corpus");
+    let walk = root;
+    for (const s of segments) {
+      walk = join(walk, s);
+      if (existsSync(walk) && lstatSync(walk).isSymbolicLink()) {
+        throw httpError(400, "path crosses a symbolic link");
+      }
+    }
     const col = collectionFor(config(), norm);
     if (!col) throw httpError(400, "no collection claims this path");
     return { full, rel: norm, col };
   }
 
-  function httpError(status, message) {
-    const e = new Error(message);
-    e.status = status;
-    return e;
+  /* The browser is not a trust boundary that 127.0.0.1 alone establishes: a
+     page on another origin can still POST here, and DNS rebinding can point a
+     hostname at this port. Require a loopback Host so a rebound name is
+     refused, and for mutations require a same-origin Origin and a JSON content
+     type so no simple cross-site request reaches the write path. */
+  function requireLoopbackHost(req) {
+    const host = req.headers.host || "";
+    const name = host.replace(/:\d+$/, "");
+    if (name !== "127.0.0.1" && name !== "localhost" && name !== "[::1]") {
+      throw httpError(403, "unexpected Host");
+    }
+    return host;
+  }
+  function guardMutation(req) {
+    const host = requireLoopbackHost(req);
+    const origin = req.headers.origin;
+    if (origin !== undefined && origin !== `http://${host}`) throw httpError(403, "cross-origin request refused");
+    // POST is the only mutating method a browser can send cross-site without a
+    // preflight, and only with a non-JSON content type. Requiring JSON there
+    // closes that path; PUT and DELETE are non-simple methods already gated by
+    // the preflight, so a bodyless DELETE is not forced to carry a type.
+    if (req.method === "POST") {
+      const ct = (req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+      if (ct !== "application/json") throw httpError(415, "content-type must be application/json");
+    }
   }
 
   function readBody(req) {
     return new Promise((res, rej) => {
       let body = "";
+      let over = false;
       req.on("data", (c) => {
+        if (over) return;
         body += c;
-        if (body.length > 4_000_000) rej(httpError(413, "document too large"));
+        if (body.length > BODY_LIMIT) {
+          over = true;
+          req.destroy();
+          rej(httpError(413, "document too large"));
+        }
       });
       req.on("end", () => {
+        if (over) return;
         try {
           res(body ? JSON.parse(body) : {});
         } catch {
@@ -71,6 +132,14 @@ export function serve(rootArg, port = 4747) {
         }
       });
     });
+  }
+
+  /* Write to a sibling temp file and rename over the destination, so a failed
+     write can never leave a document half-written or empty. */
+  function atomicWrite(full, content) {
+    const tmp = full + ".atlas-tmp-" + process.pid;
+    writeFileSync(tmp, content);
+    renameSync(tmp, full);
   }
 
   const server = createServer(async (req, res) => {
@@ -81,18 +150,22 @@ export function serve(rootArg, port = 4747) {
     };
     try {
       if (req.method === "GET" && url.pathname === "/") {
+        requireLoopbackHost(req);
         return send(200, renderPage(data()), "text/html");
       }
       if (req.method === "GET" && url.pathname === "/api/graph") {
+        requireLoopbackHost(req);
         return send(200, data());
       }
       if (url.pathname === "/api/doc") {
         if (req.method === "GET") {
+          requireLoopbackHost(req);
           const { full, rel } = confine(url.searchParams.get("path"));
           if (!existsSync(full)) throw httpError(404, "no such document");
           return send(200, { path: rel, raw: readFileSync(full, "utf8") });
         }
         if (req.method === "POST") {
+          guardMutation(req);
           const body = await readBody(req);
           const { full, rel } = confine(body.path);
           if (existsSync(full)) throw httpError(409, "document already exists");
@@ -102,15 +175,17 @@ export function serve(rootArg, port = 4747) {
           return send(201, { path: rel });
         }
         if (req.method === "PUT") {
+          guardMutation(req);
           const body = await readBody(req);
           const { full, rel, col } = confine(body.path);
           if (col.immutable) throw httpError(403, `${col.name} is immutable`);
           if (!existsSync(full)) throw httpError(404, "no such document");
-          writeFileSync(full, String(body.content ?? ""));
+          atomicWrite(full, String(body.content ?? ""));
           bust();
           return send(200, { path: rel });
         }
         if (req.method === "DELETE") {
+          guardMutation(req);
           const { full, rel, col } = confine(url.searchParams.get("path"));
           if (col.immutable) throw httpError(403, `${col.name} is immutable`);
           if (!existsSync(full)) throw httpError(404, "no such document");
@@ -125,8 +200,10 @@ export function serve(rootArg, port = 4747) {
     }
   });
 
-  return new Promise((res) => {
+  return new Promise((res, rej) => {
+    server.once("error", rej);
     server.listen(port, "127.0.0.1", () => {
+      server.removeListener("error", rej);
       res({ server, port: server.address().port, root });
     });
   });

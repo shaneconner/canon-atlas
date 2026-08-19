@@ -354,7 +354,13 @@ function corpus(name, files) {
 {
   const s = scriptJson({ body: "</script><script>alert(1)</script>" });
   assert.ok(!s.includes("</script>"));
-  pass("data destined for a script tag cannot terminate the tag");
+  // The line and paragraph separators are legal JSON string content but break a
+  // script body, so they are escaped, never dropped: a document keeps its text.
+  const body = "a" + String.fromCharCode(0x2028) + "b" + String.fromCharCode(0x2029) + "c";
+  const sep = scriptJson({ body });
+  assert.ok(sep.includes("\\u2028") && sep.includes("\\u2029"));
+  assert.deepEqual(JSON.parse(sep), { body });
+  pass("data destined for a script tag cannot terminate the tag and loses no characters");
 }
 
 /* --- build ---------------------------------------------------------------------- */
@@ -453,6 +459,95 @@ function corpus(name, files) {
   }
   pass("no write escapes the corpus root");
 
+  server.close();
+}
+
+{
+  // Symlinks must not defeat confinement or immutability: a link out of the
+  // tree, and a mutable-collection alias onto an immutable file, are both
+  // refused before anything is read or written.
+  const root = corpus("symlinkme", {
+    "articles/a.md": "# A\n",
+    "journal/2026-08-19-e.md": "---\nsubject: [a]\n---\nEvent.\n",
+    "outside/secret.md": "# outside\n",
+  });
+  const { symlinkSync, readFileSync: rf, existsSync: ex } = await import("node:fs");
+  symlinkSync(join(root, "outside"), join(root, "articles", "escape"));
+  symlinkSync(join(root, "journal", "2026-08-19-e.md"), join(root, "articles", "alias.md"));
+  const { server, port } = await serve(root, 0);
+  const base = `http://127.0.0.1:${port}`;
+
+  let res = await fetch(base + "/api/doc", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: "articles/escape/pwn.md", content: "x" }),
+  });
+  assert.equal(res.status, 400, "a write through a symlinked directory must be refused");
+  assert.ok(!ex(join(root, "outside", "pwn.md")), "nothing may land outside the corpus");
+
+  res = await fetch(base + "/api/doc", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: "articles/alias.md", content: "REWRITTEN" }),
+  });
+  assert.equal(res.status, 400, "a mutable alias onto an immutable file must be refused");
+  assert.equal(rf(join(root, "journal", "2026-08-19-e.md"), "utf8"), "---\nsubject: [a]\n---\nEvent.\n");
+  pass("a symlink cannot escape the corpus or rewrite an immutable file");
+
+  server.close();
+}
+
+{
+  // The browser is not a boundary that 127.0.0.1 alone establishes: a rebound
+  // Host, a cross-origin Origin, and a non-JSON POST are all refused.
+  const root = corpus("browserguard", { "a.md": "# A\n" });
+  const { server, port } = await serve(root, 0);
+  const base = `http://127.0.0.1:${port}`;
+
+  let res = await fetch(base + "/api/doc", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({ path: "csrf.md", content: "x" }),
+  });
+  assert.equal(res.status, 415, "a non-JSON POST must be refused");
+
+  res = await fetch(base + "/api/doc", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: "https://evil.example" },
+    body: JSON.stringify({ path: "csrf.md", content: "x" }),
+  });
+  assert.equal(res.status, 403, "a cross-origin write must be refused");
+
+  // fetch forbids overriding Host, so drive a raw request to rebind it.
+  const http = await import("node:http");
+  const rebound = await new Promise((resolve) => {
+    const rq = http.request(
+      { host: "127.0.0.1", port, method: "POST", path: "/api/doc",
+        headers: { "Content-Type": "application/json", Host: "attacker.test" } },
+      (r) => { r.resume(); resolve(r.statusCode); }
+    );
+    rq.end(JSON.stringify({ path: "csrf.md", content: "x" }));
+  });
+  assert.equal(rebound, 403, "a non-loopback Host must be refused");
+
+  res = await fetch(base + "/api/doc", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: `http://127.0.0.1:${port}` },
+    body: JSON.stringify({ path: "ok.md", content: "x" }),
+  });
+  assert.equal(res.status, 201, "a same-origin JSON write is allowed");
+  pass("the editing API refuses cross-origin, non-JSON, and rebound-Host requests");
+
+  server.close();
+}
+
+{
+  // A busy port surfaces as a rejected promise the CLI can catch, not an
+  // unhandled event.
+  const root = corpus("portclash", { "a.md": "# A\n" });
+  const { server, port } = await serve(root, 0);
+  await assert.rejects(serve(root, port), /EADDRINUSE|address|listen/i);
+  pass("a listen failure rejects instead of throwing loose");
   server.close();
 }
 

@@ -68,9 +68,9 @@ The tool is the **atlas**. The graph view is the **constellation**. The self-con
 
 ## Design constraints
 
-- No runtime dependencies. d3 is vendored, everything else is the platform.
+- No runtime dependencies. d3 is vendored (ISC, see `vendor/LICENSE.d3`), everything else is the platform.
 - The chart is one file. The only external reference is the Google Fonts stylesheet, and the page falls back to system fonts without it.
-- The server binds to 127.0.0.1 only, refuses any path outside the corpus, and enforces collection mutability at the API, not just in the UI.
+- The server binds to 127.0.0.1 only, refuses any path outside the corpus, refuses any path that crosses a symbolic link, and enforces collection mutability at the API, not just in the UI. Because the page inlines the whole corpus, the editing API also requires a loopback Host and a same-origin, JSON request, so a hostile web page cannot drive it by DNS rebinding or a cross-site POST.
 - Rendered markdown is escaped before anything else touches it; a document cannot inject markup into the page.
 - The gate suite is the contract: `node tests/verify.mjs`, every gate green before anything lands.
 

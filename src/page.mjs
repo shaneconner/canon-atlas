@@ -15,7 +15,11 @@ const read = (p) => readFileSync(join(here, p), "utf8");
 /* JSON destined for a script tag: escape the characters that could terminate
    the tag or open one, so a document body can never break out of the data. */
 export function scriptJson(value) {
-  return JSON.stringify(value).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/\u2028|\u2029/g, "");
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
 }
 
 export function buildData(config, graph, mode) {
@@ -34,7 +38,6 @@ export function buildData(config, graph, mode) {
     preset: config.preset,
     mode,
     basis,
-    generated: new Date().toISOString(),
     collections: config.collections.map((c) => ({
       name: c.name,
       match: c.match,

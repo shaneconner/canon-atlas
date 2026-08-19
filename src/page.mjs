@@ -45,6 +45,7 @@ export function buildData(config, graph, mode) {
     nodes: nodes.map((n) => ({
       id: n.id,
       path: n.path,
+      sourcePath: n.sourcePath,
       address: n.address,
       collection: n.collection,
       immutable: n.immutable,
@@ -100,6 +101,9 @@ ${readFileSync(join(here, "..", "vendor", "d3.v7.min.js"), "utf8")}
 </script>
 <script>
 var DATA = ${scriptJson(data)};
+</script>
+<script>
+${read("ui/labels.cjs")}
 </script>
 <script>
 ${read("ui/app.js")}

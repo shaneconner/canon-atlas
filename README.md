@@ -22,7 +22,7 @@ The two modes share one page.
 
 A corpus is described by collections: named groups of documents with their own frontmatter mapping and their own mutability. Without configuration:
 
-- A root holding `articles/` and `journal/` gets the **pi-canon preset**: articles are mutable, the journal is immutable and append-only, `capsule` becomes the summary, and a journal entry's `subject` list becomes edges to the articles it concerns.
+- A root holding `articles/` and `journal/` gets the **pi-canon preset**: articles are mutable, the journal is immutable and append-only, `capsule` becomes the summary, a journal entry's `subject` list becomes edges to the articles it concerns, and tags of the form `path:VALUE`, which a migrated store carries as provenance, become source metadata instead of tags.
 - Anything else is read as a single mutable collection of notes.
 
 To define your own, put a `canon-atlas.json` at the root:
@@ -57,6 +57,8 @@ Clusters come from the best signal available:
 - **Link structure** otherwise: deterministic greedy modularity over the reference graph, at zero cost, fully offline.
 
 A header toggle can also color by collection or by tag.
+
+Labels reveal progressively with zoom: the most central documents keep their names at any distance, and the rest earn them as you approach.
 
 ## Vocabulary
 

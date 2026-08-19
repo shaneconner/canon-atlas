@@ -104,6 +104,73 @@ function corpus(name, files) {
 }
 
 {
+  const root = corpus("pathtags", {
+    "articles/a.md": '---\ncapsule: "A."\nlegacy-tags: [wiki, "path:pi-canon/x"]\n---\nSee [[b]].\n',
+    "articles/b.md": '---\nlegacy-tags: [wiki, "path:pi-canon/x"]\n---\n# B\nBack to [[a]].\n',
+    "journal/2026-08-19-e.md": "---\nsubject: [a]\n---\nAn event.\n",
+  });
+  const config = loadConfig(root);
+  const docs = scanCorpus(root, config);
+  const a = docs.find((d) => d.path === "articles/a.md");
+  assert.deepEqual(a.tags, ["wiki"]);
+  assert.equal(a.sourcePath, "pi-canon/x");
+  const data = buildData(config, buildGraph(docs), "chart");
+  const node = data.nodes.find((n) => n.path === "articles/a.md");
+  assert.equal(node.sourcePath, "pi-canon/x");
+  assert.ok(data.clusters.length, "no cluster formed, so the label check proves nothing");
+  for (const c of data.clusters) {
+    assert.ok(!c.label.startsWith("path:"), `a path tag became a cluster label: ${c.label}`);
+  }
+  pass("a path: tag is source metadata, never a tag and never a cluster label");
+}
+
+{
+  const root = corpus("pathtags-bare", {
+    "one.md": '---\ntags: ["path:deliberate", alpha]\n---\n# One\n[[two]]\n',
+    "two.md": "# Two\n",
+  });
+  const docs = scanCorpus(root, loadConfig(root));
+  const one = docs.find((d) => d.path === "one.md");
+  assert.deepEqual(one.tags, ["path:deliberate", "alpha"]);
+  assert.equal(one.sourcePath, undefined);
+  pass("outside the pi-canon preset a path: tag stays a tag");
+}
+
+/* --- labels --------------------------------------------------------------------- */
+
+{
+  const { createRequire } = await import("node:module");
+  const { truncateLabel, assignTiers } = createRequire(import.meta.url)("../src/ui/labels.cjs");
+
+  const short = "a".repeat(46);
+  assert.equal(truncateLabel(short), short);
+  const wordy = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+  const cutWordy = truncateLabel(wordy);
+  assert.ok(cutWordy.endsWith("…") && cutWordy.length <= 45 && !cutWordy.includes("  "));
+  assert.equal(cutWordy, wordy.slice(0, wordy.lastIndexOf(" ", 44)) + "…");
+  const solid = "x".repeat(80);
+  assert.equal(truncateLabel(solid), "x".repeat(44) + "…");
+  const emoji = "x" + "\u{1F600}".repeat(30);
+  const cutEmoji = truncateLabel(emoji);
+  assert.ok(cutEmoji.isWellFormed(), "truncation split a surrogate pair");
+  pass("labels cut at a word boundary, hard at 44, and never through a surrogate pair");
+
+  const nodes = [];
+  for (let i = 0; i < 159; i++) nodes.push({ exists: true, rank: 1000 - i });
+  for (let i = 0; i < 7; i++) nodes.push({ exists: false, rank: 0 });
+  assignTiers(nodes);
+  const count = (k) => nodes.filter((n) => n._minK === k).length;
+  assert.equal(count(0), 8);
+  assert.equal(count(0.75), Math.round(159 * 0.2));
+  assert.equal(count(1.2), Math.round(159 * 0.4));
+  assert.ok(nodes.slice(159).every((n) => n._minK === 1.7), "a phantom label must wait for close zoom");
+  const again = nodes.map((n) => ({ exists: n.exists, rank: n.rank }));
+  assignTiers(again);
+  assert.deepEqual(again.map((n) => n._minK), nodes.map((n) => n._minK));
+  pass("zoom tiers split 8, then 20 percent, then 40 percent, deterministically");
+}
+
+{
   const root = corpus("custom", {
     "canon-atlas.json": JSON.stringify({
       title: "custom corpus",

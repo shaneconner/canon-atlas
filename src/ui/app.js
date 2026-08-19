@@ -64,7 +64,6 @@
   function reduced() {
     return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
-
   var EDGE = {
     wikilink: { dash: "7 5", dist: 118, strength: 0.3, base: 0.5, w: 1.1 },
     mdlink: { dash: "7 5", dist: 118, strength: 0.3, base: 0.5, w: 1.1 },
@@ -81,6 +80,8 @@
     var G = shapeData(data, keepPos);
     var live = data.mode === "live";
     var cleanup = [];
+
+    AtlasLabels.assignTiers(G.nodes);
 
     /* ── color modes ──────────────────────────────────────────────────── */
 
@@ -314,7 +315,7 @@
       .attr("class", "lbl")
       .attr("text-anchor", "middle").attr("paint-order", "stroke")
       .attr("stroke", C.bg).attr("stroke-width", 2.4).attr("stroke-linejoin", "round")
-      .text(function (n) { return n.title; });
+      .text(function (n) { return n._label; });
     function tintLabels() {
       labelSel.attr("fill", function (n) {
         return n.exists ? d3.hcl(d3.color(n.color)).brighter(0.9) + "" : C.dim;
@@ -328,7 +329,7 @@
       labelSel.each(function (n) {
         var fs = labelSize(n);
         this.style.fontSize = fs + "px";
-        try { n._lw = this.getComputedTextLength(); } catch (e) { n._lw = n.title.length * fs * 0.5; }
+        try { n._lw = this.getComputedTextLength(); } catch (e) { n._lw = n._label.length * fs * 0.5; }
       });
     }
 
@@ -445,6 +446,7 @@
       if (n.exists) t.style.color = d3.hcl(d3.color(n.color)).brighter(1.1) + "";
       side.appendChild(t);
       if (n.path) side.appendChild(el("p", "side-path", n.path + (n.date ? "  ·  " + n.date : "")));
+      if (n.sourcePath) side.appendChild(el("p", "side-path", "source: " + n.sourcePath));
       if (!n.exists) {
         side.appendChild(el("p", "side-meta",
           "Named by " + inOf[n.id].length + " document" + (inOf[n.id].length === 1 ? "" : "s") +
@@ -670,9 +672,11 @@
         if (f) { if (a === f) return -1; if (b === f) return 1; }
         return b.degree - a.degree;
       }).forEach(function (n) {
-        if (!f && !q && !n.exists && t.k < 1.25) return;
-        var fs = labelSize(n) * t.k;
-        var w = (n._lw || n.title.length * labelSize(n) * 0.5) + 9, h = fs * 1.2 + 5;
+        if (!f && !q && t.k < n._minK) return;
+        /* Labels render at a screen-constant size (font-size is labelSize/k
+           inside a group scaled by k), so the reservation box must be screen
+           constant too, or zooming in blockades placement with phantom height. */
+        var w = (n._lw || n._label.length * labelSize(n) * 0.5) + 9, h = labelSize(n) * 1.2 + 5;
         var cx = n.x * t.k + t.x, cy = n.y * t.k + t.y;
         for (var c = 0; c < CAND.length; c++) {
           var box = candBox(n, CAND[c], cx, cy, w, h, t.k);
@@ -920,7 +924,8 @@
     var strip = document.createElement("div");
     nodes.forEach(function (n) {
       strip.innerHTML = n.html || "";
-      n._search = (n.title + " " + (n.address || "") + " " + (n.tags || []).join(" ") + " " + strip.textContent).toLowerCase();
+      n._label = AtlasLabels.truncateLabel(n.title);
+      n._search = (n.title + " " + (n.address || "") + " " + (n.sourcePath || "") + " " + (n.tags || []).join(" ") + " " + strip.textContent).toLowerCase();
       if (keepPos) {
         var p = keepPos[n.exists ? n.path : "?" + n.title.toLowerCase()];
         if (p) { n.x = p.x; n.y = p.y; }

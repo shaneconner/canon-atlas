@@ -109,13 +109,21 @@ export function scanCorpus(root, config) {
     const title = String(meta[f.title] || "") || firstHeading(body) || address;
     const links = extractLinks(body);
     for (const r of asRefs(meta[f.refs])) links.push({ target: r, via: "ref" });
+    /* A migrated pi-canon store carries `path:VALUE` tags that record where a
+       document came from, not what it is about. Under that preset they are
+       source metadata: lift the first one out so it can be shown, and keep them
+       all out of the tag vote. Any other corpus keeps its tags untouched. */
+    const allTags = asTags(meta[f.tags]);
+    const lift = config.preset === "pi-canon";
+    const fromPath = lift ? allTags.filter((t) => t.startsWith("path:")) : [];
     docs.push({
       path: rel,
       address,
       collection: col.name,
       immutable: col.immutable,
       title,
-      tags: asTags(meta[f.tags]),
+      tags: lift ? allTags.filter((t) => !t.startsWith("path:")) : allTags,
+      sourcePath: fromPath.length ? fromPath[0].slice(5) : undefined,
       date: String(meta[f.date] || ""),
       summary: String(meta[f.summary] || ""),
       body,

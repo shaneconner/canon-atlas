@@ -9,6 +9,9 @@
 const MIN_DOCS = 8;
 const K_MIN = 4;
 const K_MAX = 10;
+/* A ramp only separates so many hues; past this the tail of small communities
+   stays unclustered rather than shredding the palette. Matches K_MAX. */
+const MAX_CLUSTERS = 10;
 
 function lcg(seed) {
   let s = seed >>> 0;
@@ -157,7 +160,8 @@ function shape(nodes, memberIds) {
   // memberIds: raw label -> member node ids. Singleton groups stay unplaced.
   const groups = [...memberIds.entries()]
     .filter(([, ids]) => ids.length >= 2)
-    .sort((a, b) => b[1].length - a[1].length || a[0] - b[0]);
+    .sort((a, b) => b[1].length - a[1].length || a[0] - b[0])
+    .slice(0, MAX_CLUSTERS);
   const clusters = [];
   const assign = new Map();
   groups.forEach(([, ids], i) => {

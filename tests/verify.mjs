@@ -292,6 +292,19 @@ function corpus(name, files) {
   const bare = assignClusters(nodes, [], null);
   assert.equal(bare.basis, "none");
   pass("without vectors clustering falls back to link structure, and an unlinked corpus has no clusters");
+
+  // Fourteen disjoint pairs: more communities than the ramp can separate.
+  const manyNodes = [];
+  const manyEdges = [];
+  for (let i = 0; i < 28; i += 2) {
+    manyNodes.push({ id: i, exists: true, tags: [], rank: 1, title: "n" + i });
+    manyNodes.push({ id: i + 1, exists: true, tags: [], rank: 1, title: "n" + (i + 1) });
+    manyEdges.push({ source: i, target: i + 1 });
+  }
+  const capped = assignClusters(manyNodes, manyEdges, null);
+  assert.equal(capped.clusters.length, 10);
+  assert.ok(manyNodes.some((n) => !capped.assign.has(n.id)), "the tail must stay unclustered");
+  pass("the cluster count caps at ten so the ramp keeps separating hues");
 }
 
 /* --- markdown ------------------------------------------------------------------- */

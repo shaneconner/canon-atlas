@@ -4,7 +4,15 @@ An atlas over a catalog of markdown documents that reference each other. Point i
 
 It is agnostic to what wrote the catalog. It was built as the human viewport onto [pi-canon](https://github.com/shaneconner/pi-canon) project memory, where mutable articles carry current ground truth and an immutable journal carries the journey to it, but any folder of markdown with `[[wikilinks]]` or relative links works: an Obsidian vault, a wiki, a notes directory, an agent memory store.
 
-![The constellation over a pi-canon memory store](docs/constellation.png)
+![The constellation over a knowledge store of two thousand documents](docs/constellation.png)
+
+Click a star and the camera flies to it, its neighborhood lights while the rest of the sky dims, and the reader opens. Follow a link and you hop the connection; back walks the trail home.
+
+![Navigating the atlas: gliding into a cluster, opening a document, hopping a connection](docs/atlas.gif)
+
+The same footage plays smoother as [a short video](docs/atlas.mp4).
+
+![A pinned document: the neighborhood lit, the sky dimmed](docs/selection.png)
 
 ## Quick start
 

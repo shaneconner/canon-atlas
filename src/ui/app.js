@@ -355,18 +355,27 @@
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pin(n); }
       })
       .call(d3.drag()
-        /* A node outside the simulation (a search-revealed satellite) would
-           ignore the pointer while the restart shakes everyone else. */
         .filter(function (e, n) { return !e.ctrlKey && !e.button && simActive(n); })
+        /* The simulation heats on the first actual movement, never on the
+           press: heating at mousedown lurched the whole sky, the node drifted
+           out from under the cursor before mouseup, and the browser resolved
+           the click to the background, which cleared the selection. */
         .on("start", function (e, n) {
           dragMoved = false;
-          if (!e.active) sim.alphaTarget(0.2).restart();
           n.fx = n.x; n.fy = n.y;
         })
-        .on("drag", function (e, n) { dragMoved = true; n.fx = e.x; n.fy = e.y; })
+        .on("drag", function (e, n) {
+          if (!dragMoved) {
+            dragMoved = true;
+            sim.alphaTarget(0.2).restart();
+          }
+          n.fx = e.x; n.fy = e.y;
+        })
         .on("end", function (e, n) {
-          if (!e.active) sim.alphaTarget(0);
-          n.fx = null; n.fy = null;
+          if (dragMoved) sim.alphaTarget(0);
+          /* A pinned node stays held where the drag left it. */
+          if (state.pinned === n) { n.fx = n.x; n.fy = n.y; }
+          else { n.fx = null; n.fy = null; }
         }));
 
     function drawShapes() {

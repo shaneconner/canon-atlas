@@ -18,7 +18,7 @@ npx canon-atlas app            # write atlas-app.html, the same app as one file
 
 Four ways into the same page.
 
-- **open** is the everyday door, made for a launcher entry: it starts the little localhost host if one is not already running, opens your browser at it, and gets out of the way. Pick or drop folders in the page; every project lives in its own browser tab off the one host. Atlas tabs quietly ping the host, and after a full day with no atlas tab open it exits itself, so nothing lingers. A desktop entry makes it a one-keystroke launch:
+- **open** is the everyday door, made for a launcher entry: it starts the little localhost host if one is not already running, opens your browser at it, and gets out of the way. Type a project's absolute path in the page and the host reads the corpus itself, remembers the path, and lists it in the folders panel as exactly that path, so ten projects whose stores are all named `.canon` still tell apart at a glance. Picking or dropping a folder works too; every project lives in its own browser tab off the one host. Atlas tabs quietly ping the host, and after a full day with no atlas tab open it exits itself, so nothing lingers. A desktop entry makes it a one-keystroke launch:
 
   ```ini
   [Desktop Entry]
@@ -28,7 +28,7 @@ Four ways into the same page.
   Terminal=false
   ```
 
-- **app** emits the pure-client app itself: one HTML file with the renderer and the whole build pipeline inlined, and no data of its own. Host it anywhere static, or open it straight from disk. Editing uses the File System Access API, which needs Chrome or Edge and an http or https page: browsers block the writable picker on `file://`, and some browsers (Brave, Firefox) ship without the API (Brave re-enables it at `brave://flags/#file-system-access-api`). Everywhere else the page falls back to a read-only folder picker, and a folder dropped anywhere on the page opens too, so the constellation still works from a double-clicked file. Remembered folders label themselves from the corpus (the API never reveals paths), and any label can be renamed in the folders panel; a name you type, like the full path, is kept as written.
+- **app** emits the pure-client app itself: one HTML file with the renderer and the whole build pipeline inlined, and no data of its own. Host it anywhere static, or open it straight from disk. Editing uses the File System Access API, which needs Chrome or Edge and an http or https page: browsers block the writable picker on `file://`, and some browsers (Brave, Firefox) ship without the API (Brave re-enables it at `brave://flags/#file-system-access-api`). Everywhere else the page falls back to a read-only folder picker, and a folder dropped anywhere on the page opens too, so the constellation still works from a double-clicked file. Remembered folders label themselves from the corpus (the picker API never reveals paths), and any label can be renamed in the folders panel; a name you type, like the full path, is kept as written. When the page comes from the local `open` host, the path door above does better: the host knows real paths, and its workspaces need no picker at all.
 - **build** emits a chart: a single HTML file with the renderer, the graph, and every document inlined. It opens from `file://`, ships as an email attachment, and publishes as a static page. Read only by nature.
 - **serve** binds to localhost and puts the corpus behind the same page: create, edit, and delete from the reader panel, with changes on disk immediately. Immutable collections are append-only, so the tool will create a journal entry but never rewrite or delete one.
 
@@ -90,7 +90,7 @@ The tool is the **atlas**. The graph view is the **constellation**. The self-con
 
 - No runtime dependencies. d3 is vendored (ISC, see `vendor/LICENSE.d3`), everything else is the platform.
 - The chart is one file. The only external reference is the Google Fonts stylesheet, and the page falls back to system fonts without it.
-- The server binds to 127.0.0.1 only, refuses any path outside the corpus, refuses any path that crosses a symbolic link, and enforces collection mutability at the API, not just in the UI. Because the page inlines the whole corpus, the editing API also requires a loopback Host and a same-origin, JSON request, so a web page on another origin cannot drive it by DNS rebinding or a cross-site POST.
+- The server binds to 127.0.0.1 only, refuses any path outside the corpus, refuses any path that crosses a symbolic link, and enforces collection mutability at the API, not just in the UI. Because the page inlines the whole corpus, the editing API also requires a loopback Host and a same-origin, JSON request, so a web page on another origin cannot drive it by DNS rebinding or a cross-site POST. The launcher host's workspace registry sits behind the same guards, and every registered workspace is served by the same handlers.
 - Rendered markdown is escaped before anything else touches it; a document cannot inject markup into the page.
 - The gate suite is the contract: `node tests/verify.mjs`, every gate green before anything lands.
 

@@ -388,6 +388,116 @@
     };
   }
 
+  /* ── workspaces by path, when the local host serves the page ──────────────
+     The `canon-atlas open` host owns a registry of projects by absolute path,
+     which no in-browser picker can ever reveal. When the page detects that
+     host, the landing and the folders panel offer the path door first: type a
+     path, the host reads the corpus behind /w/<id>/api with the same
+     confinement and mutability rules as canon-atlas serve, and the recents
+     are real paths instead of guessed labels. On any other origin the fetch
+     finds no host and none of this renders. */
+
+  var hostList = null; // [{ id, path, exists }] when the canon-atlas host answers
+
+  function hostApi(method, url, body) {
+    return fetch(url, {
+      method: method,
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      cache: "no-store",
+    }).then(function (res) {
+      return res.json().then(function (j) {
+        if (!res.ok) throw new Error(j.error || res.statusText);
+        return j;
+      });
+    });
+  }
+  function detectHost() {
+    if (location.protocol !== "http:" && location.protocol !== "https:") return Promise.resolve(null);
+    var name = location.hostname;
+    if (name !== "127.0.0.1" && name !== "localhost" && name !== "[::1]") return Promise.resolve(null);
+    return fetch("/api/workspaces", { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok || r.headers.get("x-canon-atlas") !== "app") return null;
+        return r.json().then(function (j) { return j.workspaces || []; });
+      })
+      .catch(function () { return null; });
+  }
+  function refreshHost() {
+    return detectHost().then(function (l) { hostList = l; });
+  }
+  function hostBackend(prefix) {
+    return {
+      graph: function () { return hostApi("GET", prefix + "/graph"); },
+      readDoc: function (p) { return hostApi("GET", prefix + "/doc?path=" + encodeURIComponent(p)); },
+      writeDoc: function (p, c) { return hostApi("PUT", prefix + "/doc", { path: p, content: c }); },
+      createDoc: function (p, c) { return hostApi("POST", prefix + "/doc", { path: p, content: c }); },
+      deleteDoc: function (p) { return hostApi("DELETE", prefix + "/doc?path=" + encodeURIComponent(p)); },
+    };
+  }
+  function openWorkspace(ws) {
+    setStatus("reading " + ws.path + "…");
+    var be = hostBackend("/w/" + ws.id + "/api");
+    return be.graph()
+      .then(function (data) {
+        if (!data.nodes.length) throw new Error("no markdown documents in " + ws.path);
+        currentData = data;
+        handle = null;
+        hideLanding();
+        AtlasApp.mount(data, be);
+        return refreshHost().then(renderFoldersPanel);
+      })
+      .catch(function (e) { showLanding(String((e && e.message) || e)); });
+  }
+  function openPath(path) {
+    setStatus("opening " + path + "…");
+    return hostApi("POST", "/api/workspace", { path: path })
+      .then(openWorkspace)
+      .catch(function (e) { showLanding(String((e && e.message) || e)); });
+  }
+
+  var MONO_ROW = "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;";
+
+  /* The path door and the remembered workspaces, rendered into a landing box
+     or the folders panel alike; mkHead styles the heading for its context and
+     rerender repaints that context after a forget. */
+  function hostSection(container, mkHead, rerender) {
+    var row = el("div", "display:flex;gap:6px;margin-bottom:8px;align-items:stretch;");
+    var input = el("input", CARD + "flex:1;min-width:0;padding:7px 10px;" + MONO_ROW);
+    input.placeholder = "/absolute/path/to/project";
+    var go = el("button", CARD + "color:#9aaa3a;border-color:#4a5220;padding:7px 12px;", "Open");
+    function commit() {
+      var p = input.value.trim();
+      if (p) openPath(p);
+    }
+    go.addEventListener("click", commit);
+    input.addEventListener("keydown", function (ev) { if (ev.key === "Enter") commit(); });
+    row.appendChild(input);
+    row.appendChild(go);
+    container.appendChild(row);
+    if (!hostList.length) return;
+    container.appendChild(mkHead("workspaces"));
+    hostList.forEach(function (w) {
+      var r = el("div", "display:flex;gap:6px;margin-bottom:6px;align-items:stretch;");
+      var pick = el("button",
+        CARD + "flex:1;padding:7px 10px;min-width:0;word-break:break-all;" + MONO_ROW +
+        (w.exists ? "" : "opacity:.45;"), w.path);
+      pick.title = w.exists ? w.path : w.path + "  (folder is missing)";
+      pick.addEventListener("click", function () { openWorkspace(w); });
+      var forget = el("button", CARD + "color:#8a8775;padding:7px 10px;", "×");
+      forget.title = "forget this workspace";
+      forget.addEventListener("click", function () {
+        hostApi("DELETE", "/api/workspace?id=" + encodeURIComponent(w.id))
+          .then(refreshHost)
+          .then(rerender)
+          .catch(function () {});
+      });
+      r.appendChild(pick);
+      r.appendChild(forget);
+      container.appendChild(r);
+    });
+  }
+
   /* ── landing ─────────────────────────────────────────────────────────────── */
 
   var landing = null;
@@ -418,26 +528,40 @@
     var h = el("div",
       "font:500 22px Outfit,system-ui,sans-serif;color:#ede8db;margin-bottom:6px;", "canon-atlas");
     var sub = el("div", "font:300 14px Outfit,system-ui,sans-serif;color:#8a8775;margin-bottom:20px;",
-      "Open a folder of cross-referencing markdown to see it as a constellation, or drop one anywhere on the page. Nothing leaves your computer.");
+      hostList
+        ? "Open a project by its absolute path, or drop a folder anywhere on the page. The local host reads it; nothing leaves your computer."
+        : "Open a folder of cross-referencing markdown to see it as a constellation, or drop one anywhere on the page. Nothing leaves your computer.");
     box.appendChild(h);
     box.appendChild(sub);
 
     var canEdit = supported && !isFile;
+    if (hostList) {
+      hostSection(box, function (text) {
+        return el("div",
+          "font:500 12px Outfit,system-ui,sans-serif;color:#8a8775;text-transform:uppercase;letter-spacing:.08em;margin:14px 0 10px;",
+          text);
+      }, function () { showLanding(); });
+    }
     if (canEdit) {
-      var open = el("button", CARD + "width:100%;font-size:15px;color:#9aaa3a;border-color:#4a5220;", "Open a folder…");
+      var open = el("button", CARD + "width:100%;font-size:15px;color:#9aaa3a;border-color:#4a5220;" +
+        (hostList ? "margin-top:14px;font-size:14px;color:#8a8775;border-color:#33341f;" : ""), "Open a folder…");
       open.addEventListener("click", pickFolder);
       box.appendChild(open);
       var alt = el("button", CARD + "width:100%;margin-top:8px;color:#8a8775;", "Browse a folder read-only…");
       alt.addEventListener("click", pickBrowse);
       box.appendChild(alt);
     } else {
-      var browse = el("button", CARD + "width:100%;font-size:15px;color:#9aaa3a;border-color:#4a5220;", "Browse a folder…  (read only)");
+      var browse = el("button", CARD + "width:100%;" +
+        (hostList ? "margin-top:14px;color:#8a8775;" : "font-size:15px;color:#9aaa3a;border-color:#4a5220;"),
+        "Browse a folder…  (read only)");
       browse.addEventListener("click", pickBrowse);
       box.appendChild(browse);
-      var why = isFile && supported
-        ? "Editing needs this page served over http: browsers block the writable folder picker on file:// pages. Launch it with canon-atlas open and editing lights up."
-        : "Editing needs the File System Access API: Chrome or Edge over http or https, or Brave with its file-system-access flag enabled.";
-      box.appendChild(el("div", "color:#8a8775;font:300 13px Outfit,system-ui,sans-serif;line-height:1.5;margin-top:12px;", why));
+      if (!hostList) {
+        var why = isFile && supported
+          ? "Editing needs this page served over http: browsers block the writable folder picker on file:// pages. Launch it with canon-atlas open and editing lights up."
+          : "Editing needs the File System Access API: Chrome or Edge over http or https, or Brave with its file-system-access flag enabled.";
+        box.appendChild(el("div", "color:#8a8775;font:300 13px Outfit,system-ui,sans-serif;line-height:1.5;margin-top:12px;", why));
+      }
     }
 
     if (message) {
@@ -614,7 +738,15 @@
     var kind = el("p", "", "folders");
     kind.className = "side-kind";
     panel.appendChild(kind);
-    var open = el("button", CARD + "width:100%;color:#9aaa3a;border-color:#4a5220;",
+    if (hostList) {
+      hostSection(panel, function (text) {
+        var head = el("p", "", text);
+        head.className = "side-sec";
+        return head;
+      }, renderFoldersPanel);
+    }
+    var open = el("button", CARD + "width:100%;" +
+      (hostList ? "margin-top:8px;color:#8a8775;" : "color:#9aaa3a;border-color:#4a5220;"),
       canEdit ? "Open a folder…" : "Browse a folder…  (read only)");
     open.addEventListener("click", canEdit ? pickFolder : pickBrowse);
     panel.appendChild(open);
@@ -687,4 +819,11 @@
   wireDrop();
   heartbeat();
   showLanding();
+  /* The host answers in a round trip; when it does, the landing and the
+     panel repaint with the path door and the remembered workspaces. */
+  refreshHost().then(function () {
+    if (!hostList) return;
+    renderFoldersPanel();
+    if (landing) showLanding();
+  });
 })();

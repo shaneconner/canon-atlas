@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -884,7 +884,12 @@ function corpus(name, files) {
   const page = await fetch(base + "/");
   assert.equal(page.status, 200);
   assert.equal(page.headers.get("x-canon-atlas"), "app", "the host must identify itself");
-  assert.ok((await page.text()).includes("showDirectoryPicker"));
+  const pageText = await page.text();
+  assert.ok(pageText.includes("showDirectoryPicker"));
+  // The grid's one row must be pinned to the grid's height: an implicit auto
+  // row grows to fit a long document in the reader, stretching the stage
+  // thousands of pixels tall, and the camera then centres nodes below the fold.
+  assert.ok(pageText.includes("grid-template-rows: minmax(0, 1fr)"), "the grid row track must be pinned");
   const ping = await fetch(base + "/ping");
   assert.equal(ping.status, 204, "atlas tabs beat GET /ping");
   assert.equal((await fetch(base + "/", { method: "POST" })).status, 405, "the app host must refuse mutations");
@@ -907,6 +912,97 @@ function corpus(name, files) {
   assert.equal((await fetch(`http://127.0.0.1:${idleHost.port}/ping`)).status, 204);
   assert.equal(await idled, true, "the idle host must close itself");
   pass("the app host serves loopback only, answers pings, and exits itself when idle");
+}
+
+{
+  // The launcher host remembers projects by absolute path, the one thing the
+  // in-browser pickers can never show. A registered workspace answers at
+  // /w/<id>/api through the very handlers serve mounts, so confinement and
+  // immutability hold at the path door too, and the registry survives in the
+  // workspaces file for the next launch.
+  const root = corpus("wsme", {
+    "articles/a.md": "# A\n[[b]]\n",
+    "articles/b.md": "# B\n",
+    "journal/2026-08-19-e.md": "---\nsubject: [a]\n---\nEvent.\n",
+  });
+  const wsFile = join(work, "wsconfig", "workspaces.json");
+  const { server, port } = await serveApp(0, { workspacesFile: wsFile });
+  const base = `http://127.0.0.1:${port}`;
+  const j = (r) => r.json();
+  const post = (url, body, headers) =>
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(headers || {}) },
+      body: JSON.stringify(body),
+    });
+
+  assert.deepEqual((await j(await fetch(base + "/api/workspaces"))).workspaces, []);
+  let res = await post(base + "/api/workspace", { path: root });
+  assert.equal(res.status, 201);
+  const ws = await j(res);
+  assert.equal(ws.path, realpathSync(root));
+  res = await post(base + "/api/workspace", { path: root });
+  assert.equal(res.status, 200, "re-registering the same folder reuses its id");
+  assert.equal((await j(res)).id, ws.id);
+  const listed = (await j(await fetch(base + "/api/workspaces"))).workspaces;
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].exists, true);
+  assert.ok(
+    JSON.parse(readFileSync(wsFile, "utf8")).workspaces.some((w) => w.id === ws.id),
+    "the registry must survive on disk"
+  );
+  pass("a workspace registers by absolute path, once, and persists");
+
+  const wsGraph = await j(await fetch(`${base}/w/${ws.id}/api/graph`));
+  const live = await serve(root, 0);
+  const liveGraph = await j(await fetch(`http://127.0.0.1:${live.port}/api/graph`));
+  live.server.close();
+  assert.deepEqual(wsGraph, liveGraph, "the workspace door and serve must agree on the wire data");
+  res = await post(`${base}/w/${ws.id}/api/doc`, { path: "articles/c.md", content: "# C\n" });
+  assert.equal(res.status, 201);
+  res = await fetch(`${base}/w/${ws.id}/api/doc`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: "journal/2026-08-19-e.md", content: "rewrite" }),
+  });
+  assert.equal(res.status, 403, "immutability must hold at the path door");
+  pass("a workspace serves the full corpus API, rules intact");
+
+  for (const [body, why] of [
+    [{ path: "relative/path" }, "a relative path"],
+    [{ path: join(root, "articles/a.md") }, "a file"],
+    [{ path: join(work, "never-there") }, "a missing folder"],
+    [{}, "no path"],
+  ]) {
+    res = await post(base + "/api/workspace", body);
+    assert.equal(res.status, 400, `expected 400 for ${why}`);
+  }
+  res = await fetch(base + "/api/workspace", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({ path: root }),
+  });
+  assert.equal(res.status, 415, "a non-JSON register must be refused");
+  res = await post(base + "/api/workspace", { path: root }, { Origin: "http://evil.example" });
+  assert.equal(res.status, 403, "a cross-origin register must be refused");
+  pass("the workspace door refuses bad paths, bad types, and other origins");
+
+  // A folder that walks away is a fact to show, not a crash: the row lists as
+  // missing and its API answers 404 until the folder returns.
+  const goner = corpus("wsgone", { "articles/g.md": "# G\n" });
+  const gone = await j(await post(base + "/api/workspace", { path: goner }));
+  rmSync(goner, { recursive: true, force: true });
+  const rows = (await j(await fetch(base + "/api/workspaces"))).workspaces;
+  assert.equal(rows.find((w) => w.id === gone.id).exists, false);
+  assert.equal((await fetch(`${base}/w/${gone.id}/api/graph`)).status, 404);
+
+  res = await fetch(base + "/api/workspace?id=" + ws.id, { method: "DELETE" });
+  assert.equal(res.status, 200);
+  assert.equal((await fetch(`${base}/w/${ws.id}/api/graph`)).status, 404);
+  assert.ok(!JSON.parse(readFileSync(wsFile, "utf8")).workspaces.some((w) => w.id === ws.id));
+  pass("a missing folder reads as missing; a forgotten workspace is gone from door and disk");
+
+  server.close();
 }
 
 /* --- cli ------------------------------------------------------------------------ */

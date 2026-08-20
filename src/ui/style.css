@@ -59,6 +59,10 @@ select.abtn option { background: var(--bg-elevated); color: var(--text); }
   --sb-w: 280px;
   --side-w: 340px;
   grid-template-columns: 44px var(--sb-w) auto minmax(0, 1fr) auto var(--side-w);
+  /* The row track is pinned to the grid's height: an implicit auto row grows
+     to fit a long document in the reader, stretching the stage thousands of
+     pixels tall, and the camera then centres nodes far below the fold. */
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
 }
 

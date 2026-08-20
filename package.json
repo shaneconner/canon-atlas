@@ -1,6 +1,6 @@
 {
   "name": "canon-atlas",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "An atlas over a catalog of markdown documents that reference each other: a constellation graph, search, a reader, and local editing. Agnostic to what wrote the catalog.",
   "type": "module",
   "bin": {

@@ -7,15 +7,21 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
-import { loadConfig, collectionFor } from "../src/config.mjs";
+import { loadConfig, loadVectors, collectionFor } from "../src/config.mjs";
 import { parseFrontmatter, extractLinks, scanCorpus } from "../src/scan.mjs";
 import { buildGraph, pagerank } from "../src/graph.mjs";
 import { communities, assignClusters } from "../src/clusters.mjs";
 import { renderMarkdown } from "../src/markdown.mjs";
-import { scriptJson, buildData } from "../src/page.mjs";
+import { scriptJson, buildData, renderAppPage } from "../src/page.mjs";
 import { build } from "../src/build.mjs";
-import { serve } from "../src/serve.mjs";
+import { embed } from "../src/embed.mjs";
+import { serve, serveApp } from "../src/serve.mjs";
+
+// The shared pipeline, required the way the browser reaches it (as a global);
+// buildWireData is the pure-client entry the app page calls.
+const pipeline = createRequire(import.meta.url)("../src/ui/pipeline.cjs");
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 let gates = 0;
@@ -120,6 +126,14 @@ function corpus(name, files) {
   assert.equal(config.collections.find((c) => c.name === "articles").reveal, "always");
   assert.equal(collectionFor(config, "articles/x.md").name, "articles");
   assert.equal(collectionFor(config, "notes.md"), null);
+
+  // Naming the workspace must not cost the preset: a config that carries only
+  // a title keeps the detected collections.
+  writeFileSync(join(root, "canon-atlas.json"), JSON.stringify({ title: "my workspace" }));
+  const titled = loadConfig(root);
+  assert.equal(titled.title, "my workspace");
+  assert.equal(titled.preset, "pi-canon", "a title-only config keeps the detected preset");
+  assert.equal(titled.collections.find((c) => c.name === "journal").immutable, true);
   pass("a root holding articles/ and journal/ gets the pi-canon preset, journal immutable");
 
   const docs = scanCorpus(root, config);
@@ -665,7 +679,7 @@ function corpus(name, files) {
 
   res = await fetch(base + "/api/doc", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Origin: "https://evil.example" },
+    headers: { "Content-Type": "application/json", Origin: "https://other-origin.example" },
     body: JSON.stringify({ path: "csrf.md", content: "x" }),
   });
   assert.equal(res.status, 403, "a cross-origin write must be refused");
@@ -675,7 +689,7 @@ function corpus(name, files) {
   const rebound = await new Promise((resolve) => {
     const rq = http.request(
       { host: "127.0.0.1", port, method: "POST", path: "/api/doc",
-        headers: { "Content-Type": "application/json", Host: "attacker.test" } },
+        headers: { "Content-Type": "application/json", Host: "rebound.test" } },
       (r) => { r.resume(); resolve(r.statusCode); }
     );
     rq.end(JSON.stringify({ path: "csrf.md", content: "x" }));
@@ -703,6 +717,198 @@ function corpus(name, files) {
   server.close();
 }
 
+/* --- isomorphic pipeline -------------------------------------------------------- */
+
+{
+  // The browser builds the same wire data from the same files, with no server:
+  // buildWireData(files) must equal the Node scan -> graph -> data path exactly,
+  // including node ids, phantoms, clusters, the path-tag lift, and rendered HTML.
+  const files = {
+    "articles/a.md":
+      "---\ntitle: Alpha\nlegacy-tags:\n  - path:orig/a\n  - topic\n---\n# Alpha\nsee [[lab/deep]], [rel](./b.md), and [[ghost]]\n",
+    "articles/b.md": "---\ntitle: Beta\n---\n# Beta\nback to [[a]]\n",
+    "articles/lab/deep.md": "---\ntitle: Deep\n---\n# Deep\nup to [[a]]\n",
+    "journal/2026-01-01-note.md": "---\nlogged: 2026-01-01\nsubject: lab/deep\n---\nan event about deep\n",
+  };
+  const root = corpus("iso", files);
+
+  const config = loadConfig(root);
+  const nodeData = buildData(config, buildGraph(scanCorpus(root, config)), "fs");
+
+  // Hand the browser entry the files in reversed order and with a stray asset,
+  // to prove it filters and canonicalizes rather than trusting enumeration order.
+  const browserFiles = Object.entries(files)
+    .map(([path, text]) => ({ path, text }))
+    .reverse();
+  browserFiles.push({ path: "articles/cover.png", text: "not markdown" });
+  const browserData = pipeline.buildWireData(browserFiles, { mode: "fs" });
+
+  assert.equal(nodeData.preset, "pi-canon");
+  assert.deepEqual(browserData, nodeData);
+  assert.equal(scriptJson(browserData), scriptJson(nodeData));
+  // The lift and a phantom both survive the browser path.
+  const alpha = browserData.nodes.find((n) => n.address === "a");
+  assert.equal(alpha.sourcePath, "orig/a");
+  assert.deepEqual(alpha.tags, ["topic"]);
+  assert.ok(browserData.nodes.some((n) => !n.exists && n.address === "ghost"));
+  pass("the browser pipeline builds byte-identical wire data with no server");
+}
+
+{
+  // A hierarchical store names its own neighborhoods: with no embeddings, the
+  // first path segment clusters ahead of link communities, labels are the
+  // segments themselves, and a hub without a slash groups with its children.
+  const docs = [
+    ["meta/memory/one.md", "# One\n[[two]]\n"],
+    ["meta/memory/two.md", "# Two\n"],
+    ["meta.md", "# Meta\n"],
+    ["assets/filters/a.md", "# A\n"],
+    ["assets/filters/b.md", "# B\n[[a]]\n"],
+    ["lone.md", "# Lone\n"],
+  ];
+  const root = corpus("paths", Object.fromEntries(docs));
+  const config = loadConfig(root);
+  const data = buildData(config, buildGraph(scanCorpus(root, config)), "fs");
+  assert.equal(data.basis, "paths");
+  const labels = data.clusters.map((c) => c.label).sort();
+  assert.deepEqual(labels, ["assets", "meta"]);
+  const meta = data.nodes.find((n) => n.address === "meta");
+  const one = data.nodes.find((n) => n.address === "meta/memory/one");
+  assert.equal(meta.cluster, one.cluster, "the hub document groups with its path children");
+  const lone = data.nodes.find((n) => n.address === "lone");
+  assert.equal(lone.cluster, null, "a singleton segment stays unplaced");
+  pass("hierarchical addresses cluster by first segment, labeled by the segment");
+}
+
+{
+  // Embedding generation against a mock provider: vectors land keyed by path,
+  // the __meta__ record hides from the reader, a rerun embeds nothing, a
+  // changed document embeds alone, and a deleted document's vector comes out.
+  const http = await import("node:http");
+  let calls = 0;
+  let lastCount = 0;
+  const mock = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const { input } = JSON.parse(body);
+      calls++;
+      lastCount = input.length;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ embeddings: input.map((t, i) => [t.length, i + 0.1234567891, 0.5]) }));
+    });
+  });
+  await new Promise((r) => mock.listen(0, "127.0.0.1", r));
+  process.env.OLLAMA_HOST = `http://127.0.0.1:${mock.address().port}`;
+
+  const root = corpus("embed", {
+    "articles/a.md": "# Alpha\nabout things\n",
+    "articles/b.md": "# Beta\nabout other things\n",
+    "journal/j.md": "---\nlogged: 2026-01-01\n---\nevent\n",
+  });
+
+  const first = await embed(root, "ollama:mock-model");
+  assert.equal(first.embedded, 3);
+  const written = JSON.parse(readFileSync(join(root, "embeddings.json"), "utf8"));
+  assert.ok(Array.isArray(written["articles/a.md"]));
+  assert.equal(written.__meta__.model, "ollama:mock-model");
+  const stored = Object.entries(written).find(([k]) => k !== "__meta__")[1];
+  assert.ok(
+    stored.every((v) => v === Math.round(v * 1e6) / 1e6),
+    "vectors round to six decimals so high-dimension files stay small"
+  );
+  assert.ok(
+    stored.some((v) => String(v).includes(".123457")),
+    "rounding is a round, not a truncation"
+  );
+  const cfg = loadConfig(root);
+  const vectors = loadVectors(root, cfg);
+  assert.ok(vectors["articles/a.md"], "the reader consumes the generated vectors");
+  assert.ok(!vectors.__meta__, "the reader skips the __meta__ record");
+
+  // A bare rerun, no -m: the corpus keeps its recorded model instead of
+  // falling back to the default and re-embedding the world.
+  const again = await embed(root);
+  assert.equal(again.model, "ollama:mock-model", "a rerun keeps the recorded model");
+  assert.equal(again.embedded, 0, "an unchanged corpus embeds nothing");
+  assert.equal(again.reused, 3);
+
+  writeFileSync(join(root, "articles/a.md"), "# Alpha\nrewritten body\n");
+  const changed = await embed(root, "ollama:mock-model");
+  assert.equal(changed.embedded, 1, "only the changed document re-embeds");
+  assert.equal(lastCount, 1);
+
+  const { unlinkSync } = await import("node:fs");
+  unlinkSync(join(root, "articles/b.md"));
+  const pruned = await embed(root, "ollama:mock-model");
+  assert.equal(pruned.removed, 1, "a deleted document's vector comes out");
+  const after = JSON.parse(readFileSync(join(root, "embeddings.json"), "utf8"));
+  assert.ok(!after["articles/b.md"]);
+
+  delete process.env.OLLAMA_HOST;
+  mock.close();
+  assert.ok(calls >= 2);
+  pass("embed writes incremental, reader-safe vectors at the corpus root");
+}
+
+/* --- pure-client app ------------------------------------------------------------ */
+
+{
+  // One self-contained file that opens folders in the browser: it inlines the
+  // shared pipeline and the folder shell, carries no baked-in data (so app.js
+  // waits for a picked folder rather than booting a chart), and loads nothing
+  // external but Google Fonts.
+  const html = renderAppPage();
+  assert.ok(html.startsWith("<!DOCTYPE html>"));
+  assert.ok(html.includes("var AtlasPipeline"), "the app inlines the shared pipeline");
+  assert.ok(html.includes("showDirectoryPicker"), "the app inlines the folder shell");
+  assert.ok(html.includes("webkitdirectory"), "the app carries the read-only fallback picker");
+  assert.ok(html.includes("getAsFileSystemHandle"), "the app accepts a dropped folder");
+  assert.ok(html.includes("window.AtlasApp"), "the app exposes a mount point");
+  assert.ok(!html.includes("var DATA ="), "the app carries no baked-in data");
+  assert.ok(html.length > 200000, "d3 and the pipeline are inlined, so the app is self-contained");
+  const externals = [...html.matchAll(/<(?:script|link)\b[^>]*\s(?:src|href)="(https?:[^"]+)"/g)].map((m) => m[1]);
+  assert.ok(externals.length > 0);
+  for (const u of externals) {
+    assert.ok(u.startsWith("https://fonts.googleapis.com"), "unexpected external reference: " + u);
+  }
+  pass("the pure-client app is one self-contained file that mounts on a picked folder");
+}
+
+{
+  // Hosting the app unblocks the writable folder picker (browsers refuse it on
+  // file:// pages). The host is static: it serves the page to loopback and
+  // nothing else, since all reading and writing happens in the browser.
+  const { server, port } = await serveApp(0);
+  const base = `http://127.0.0.1:${port}`;
+  const page = await fetch(base + "/");
+  assert.equal(page.status, 200);
+  assert.equal(page.headers.get("x-canon-atlas"), "app", "the host must identify itself");
+  assert.ok((await page.text()).includes("showDirectoryPicker"));
+  const ping = await fetch(base + "/ping");
+  assert.equal(ping.status, 204, "atlas tabs beat GET /ping");
+  assert.equal((await fetch(base + "/", { method: "POST" })).status, 405, "the app host must refuse mutations");
+  const http = await import("node:http");
+  const rebound = await new Promise((resolve) => {
+    const rq = http.request(
+      { host: "127.0.0.1", port, method: "GET", path: "/", headers: { Host: "rebound.test" } },
+      (r) => { r.resume(); resolve(r.statusCode); }
+    );
+    rq.end();
+  });
+  assert.equal(rebound, 403, "the app host must refuse a non-loopback Host");
+  server.close();
+
+  // The launcher flow must not linger: a stretch of silence longer than idleMs
+  // closes the host and fires onIdle.
+  let idleFired;
+  const idled = new Promise((resolve) => (idleFired = resolve));
+  const idleHost = await serveApp(0, { idleMs: 150, onIdle: () => idleFired(true) });
+  assert.equal((await fetch(`http://127.0.0.1:${idleHost.port}/ping`)).status, 204);
+  assert.equal(await idled, true, "the idle host must close itself");
+  pass("the app host serves loopback only, answers pings, and exits itself when idle");
+}
+
 /* --- cli ------------------------------------------------------------------------ */
 
 {
@@ -713,10 +919,20 @@ function corpus(name, files) {
   });
   assert.equal(r.status, 0, r.stderr);
   assert.ok(readFileSync(out, "utf8").includes("var DATA ="));
+
+  const appOut = join(work, "cli-app.html");
+  const ra = spawnSync(process.execPath, [join(projectRoot, "src/cli.mjs"), "app", "-o", appOut], {
+    encoding: "utf8",
+  });
+  assert.equal(ra.status, 0, ra.stderr);
+  assert.ok(readFileSync(appOut, "utf8").includes("showDirectoryPicker"));
+
   const help = spawnSync(process.execPath, [join(projectRoot, "src/cli.mjs")], { encoding: "utf8" });
   assert.equal(help.status, 0);
   assert.ok(help.stdout.includes("usage:"));
-  pass("the CLI builds a chart and explains itself");
+  assert.ok(help.stdout.includes("canon-atlas open"));
+  assert.ok(help.stdout.includes("canon-atlas app"));
+  pass("the CLI builds a chart, the app, and explains itself");
 }
 
 console.log(`\nall ${gates} gates green`);

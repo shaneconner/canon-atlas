@@ -1,6 +1,6 @@
 # canon-atlas
 
-An atlas over a catalog of markdown documents that reference each other. Point it at a directory and it draws the whole corpus as a constellation: documents as lit spheres, references as gossamer links, semantic clusters as colored regions of the map. Beside the graph sit search, a reader, and, in live mode, editing.
+An atlas over a catalog of markdown documents that reference each other. Point it at a directory and it draws the whole corpus as a constellation: documents as lit spheres, references as gossamer links, semantic clusters as colored regions of the map. There is no chrome beyond what the map needs: an icon rail on the left owns the panels (documents with search and ordering, the map's clusters and key, and in the app your folders), and a reader on the right opens a tab per document, with editing once a folder or a server backs the page. Every document you open is a browser history entry, so back and forward walk the trail of articles you read, and a hierarchical address renders as breadcrumbs above the document.
 
 It is agnostic to what wrote the catalog. It was built as the human viewport onto [pi-canon](https://github.com/shaneconner/pi-canon) project memory, where mutable articles carry current ground truth and an immutable journal carries the journey to it, but any folder of markdown with `[[wikilinks]]` or relative links works: an Obsidian vault, a wiki, a notes directory, an agent memory store.
 
@@ -9,14 +9,30 @@ It is agnostic to what wrote the catalog. It was built as the human viewport ont
 ## Quick start
 
 ```sh
-npx canon-atlas build .        # write atlas.html, one self-contained file
+npx canon-atlas open           # open the atlas in your browser; pick folders in the page
+npx canon-atlas embed .        # write embeddings.json, so color means meaning
+npx canon-atlas build .        # write atlas.html, one self-contained chart of this folder
 npx canon-atlas serve .        # serve the live atlas at http://127.0.0.1:4747/
+npx canon-atlas app            # write atlas-app.html, the same app as one file
 ```
 
-The two modes share one page.
+Four ways into the same page.
 
+- **open** is the everyday door, made for a launcher entry: it starts the little localhost host if one is not already running, opens your browser at it, and gets out of the way. Pick or drop folders in the page; every project lives in its own browser tab off the one host. Atlas tabs quietly ping the host, and after a full day with no atlas tab open it exits itself, so nothing lingers. A desktop entry makes it a one-keystroke launch:
+
+  ```ini
+  [Desktop Entry]
+  Type=Application
+  Name=canon-atlas
+  Exec=canon-atlas open
+  Terminal=false
+  ```
+
+- **app** emits the pure-client app itself: one HTML file with the renderer and the whole build pipeline inlined, and no data of its own. Host it anywhere static, or open it straight from disk. Editing uses the File System Access API, which needs Chrome or Edge and an http or https page: browsers block the writable picker on `file://`, and some browsers (Brave, Firefox) ship without the API (Brave re-enables it at `brave://flags/#file-system-access-api`). Everywhere else the page falls back to a read-only folder picker, and a folder dropped anywhere on the page opens too, so the constellation still works from a double-clicked file. Remembered folders label themselves from the corpus (the API never reveals paths), and any label can be renamed in the folders panel; a name you type, like the full path, is kept as written.
 - **build** emits a chart: a single HTML file with the renderer, the graph, and every document inlined. It opens from `file://`, ships as an email attachment, and publishes as a static page. Read only by nature.
 - **serve** binds to localhost and puts the corpus behind the same page: create, edit, and delete from the reader panel, with changes on disk immediately. Immutable collections are append-only, so the tool will create a journal entry but never rewrite or delete one.
+
+The **open**, **app**, and **serve** paths build the wire data from the exact same pipeline, so the constellation is identical whether the markdown is read in the browser or by the server.
 
 ## Collections
 
@@ -40,7 +56,7 @@ To define your own, put a `canon-atlas.json` at the root:
 
 `match` is a directory prefix; the longest prefix claims a file. `fields` maps your frontmatter keys onto the ones the atlas reads: `title`, `tags`, `date`, `summary`, and `refs` (a frontmatter list of documents this one concerns, rendered as edges). Titles fall back to the first heading, then to the path. `immutable` marks a collection append-only and draws its documents as rings instead of spheres.
 
-`reveal` controls how much of a collection sits on the map: `"always"` (the default), `"focus"`, or `"off"`. A `focus` collection stays off the map and out of the layout until you select a document, when its neighbors from that collection bloom around it; searching also surfaces its matches. The collection's chip cycles through revealed-on-focus, shown in full at reduced weight, and hidden. The pi-canon preset marks the journal `focus`: a hundred immutable event entries are detail on demand, not weather. This is why a large corpus reads as a calm sky.
+`reveal` controls whether a collection starts on the map: `"always"` (the default) or `"off"` (`"focus"` is accepted and means the same). A collection is on the map exactly when its row in the map panel's key is on: off means gone, layout included, so a hidden tier claims no empty space and nothing lingers. The pi-canon preset starts the journal off: a hundred immutable event entries are detail on demand, not weather. This is why a large corpus reads as a calm sky.
 
 References that resolve nowhere are not errors: they render as dashed, unwritten nodes, because a name the corpus reaches for but has not written yet is a fact worth seeing. In live mode an unwritten node offers to be written.
 
@@ -56,21 +72,25 @@ Clusters come from the best signal available:
   { "articles/core.md": [0.021, -0.113, ...], "articles/helper.md": [...] }
   ```
 
+  `canon-atlas embed [root]` writes that file for you. It is the one command in the atlas that touches a network, and only the provider named: the default is a local [Ollama](https://ollama.com) (`nomic-embed-text`; `OLLAMA_HOST` overrides the address), so by default nothing leaves the machine. `-m openai` or `-m openai:MODEL` uses the OpenAI API instead, reading `OPENAI_API_KEY` from the environment. Reruns embed only documents whose content changed, drop vectors for deleted documents, and write atomically after every batch, so an interrupted run keeps its progress. A corpus embedded once keeps its recorded model on bare reruns; `-m` switches models and re-embeds everything. A small `__meta__` record inside the file carries the model name and content hashes; readers ignore it.
+
+- **Paths**, when addresses form a real hierarchy (`src/core/config`, `meta/memory/folds/x`): documents cluster by the first path segment, labeled by the segment itself. A hierarchical store names its own neighborhoods.
+
 - **Link structure** otherwise: deterministic greedy modularity over the reference graph, at zero cost, fully offline.
 
-A header toggle can also color by collection or by tag.
+The map panel can also color by collection or by tag.
 
 Labels reveal progressively with zoom: the most central documents keep their names at any distance, and the rest earn them as you approach.
 
 ## Vocabulary
 
-The tool is the **atlas**. The graph view is the **constellation**. The self-contained file the build emits is a **chart**. A star atlas is a book of constellation maps, and in mathematics an atlas is a collection of charts that together cover a space; both senses are meant.
+The tool is the **atlas**. The graph view is the **constellation**. The self-contained file the build emits is a **chart**. The serverless page that opens folders in the browser is the **app**. A star atlas is a book of constellation maps, and in mathematics an atlas is a collection of charts that together cover a space; both senses are meant.
 
 ## Design constraints
 
 - No runtime dependencies. d3 is vendored (ISC, see `vendor/LICENSE.d3`), everything else is the platform.
 - The chart is one file. The only external reference is the Google Fonts stylesheet, and the page falls back to system fonts without it.
-- The server binds to 127.0.0.1 only, refuses any path outside the corpus, refuses any path that crosses a symbolic link, and enforces collection mutability at the API, not just in the UI. Because the page inlines the whole corpus, the editing API also requires a loopback Host and a same-origin, JSON request, so a hostile web page cannot drive it by DNS rebinding or a cross-site POST.
+- The server binds to 127.0.0.1 only, refuses any path outside the corpus, refuses any path that crosses a symbolic link, and enforces collection mutability at the API, not just in the UI. Because the page inlines the whole corpus, the editing API also requires a loopback Host and a same-origin, JSON request, so a web page on another origin cannot drive it by DNS rebinding or a cross-site POST.
 - Rendered markdown is escaped before anything else touches it; a document cannot inject markup into the page.
 - The gate suite is the contract: `node tests/verify.mjs`, every gate green before anything lands.
 

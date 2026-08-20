@@ -8,8 +8,8 @@
    collection, is refused rather than followed. Because the page inlines the
    whole corpus and the API mutates it, the browser is kept off the door too:
    loopback Host, same-origin Origin, and a JSON content type are required, so a
-   hostile page cannot drive the API by DNS rebinding or a simple cross-site
-   POST. */
+   page on another origin cannot drive the API by DNS rebinding or a simple
+   cross-site POST. */
 
 import { createServer } from "node:http";
 import {
@@ -26,7 +26,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { loadConfig, loadVectors, collectionFor } from "./config.mjs";
 import { scanCorpus } from "./scan.mjs";
 import { buildGraph } from "./graph.mjs";
-import { buildData, renderPage } from "./page.mjs";
+import { buildData, renderPage, renderAppPage } from "./page.mjs";
 
 const CACHE_TTL_MS = 3000;
 const BODY_LIMIT = 4_000_000;
@@ -205,6 +205,57 @@ export function serve(rootArg, port = 4747) {
     server.listen(port, "127.0.0.1", () => {
       server.removeListener("error", rej);
       res({ server, port: server.address().port, root });
+    });
+  });
+}
+
+/* Host the pure-client app itself: one static page, no corpus behind it and no
+   API, so one process serves every project. Browsers block the writable folder
+   picker on file:// pages; an http origin unblocks it, and this is the smallest
+   one. All reading and writing still happens in the browser via the picked
+   directory handles.
+
+   Atlas tabs beat GET /ping while open. With opts.idleMs set, a stretch of
+   silence that long closes the server and calls opts.onIdle, so the launcher
+   flow can exit itself instead of lingering. Every response carries an
+   x-canon-atlas header so a relaunch can tell this host from a stranger on
+   the same port. */
+export function serveApp(port = 4700, opts = {}) {
+  const page = renderAppPage();
+  let lastSeen = Date.now();
+  const server = createServer((req, res) => {
+    lastSeen = Date.now();
+    const stamp = { "x-canon-atlas": "app" };
+    const host = (req.headers.host || "").replace(/:\d+$/, "");
+    if (host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]") {
+      res.writeHead(403, { ...stamp, "Content-Type": "application/json; charset=utf-8" });
+      return res.end(JSON.stringify({ error: "unexpected Host" }));
+    }
+    if (req.method !== "GET") {
+      res.writeHead(405, { ...stamp, "Content-Type": "application/json; charset=utf-8" });
+      return res.end(JSON.stringify({ error: "the app host is static" }));
+    }
+    if (new URL(req.url, "http://localhost").pathname === "/ping") {
+      res.writeHead(204, stamp);
+      return res.end();
+    }
+    res.writeHead(200, { ...stamp, "Content-Type": "text/html; charset=utf-8" });
+    res.end(page);
+  });
+  if (opts.idleMs) {
+    const timer = setInterval(() => {
+      if (Date.now() - lastSeen > opts.idleMs) {
+        clearInterval(timer);
+        server.close();
+        if (opts.onIdle) opts.onIdle();
+      }
+    }, Math.min(opts.idleMs, 15000));
+  }
+  return new Promise((res, rej) => {
+    server.once("error", rej);
+    server.listen(port, "127.0.0.1", () => {
+      server.removeListener("error", rej);
+      res({ server, port: server.address().port });
     });
   });
 }

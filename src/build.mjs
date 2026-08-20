@@ -1,11 +1,12 @@
-/* Build: corpus in, one self-contained chart out. */
+/* Build: corpus in, one self-contained chart out. Or, with no corpus, the
+   pure-client app: one self-contained page that opens folders in the browser. */
 
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadConfig, loadVectors } from "./config.mjs";
 import { scanCorpus } from "./scan.mjs";
 import { buildGraph } from "./graph.mjs";
-import { buildData, renderPage } from "./page.mjs";
+import { buildData, renderPage, renderAppPage } from "./page.mjs";
 
 export function build(rootArg, outArg) {
   const root = resolve(rootArg || ".");
@@ -25,3 +26,12 @@ export function build(rootArg, outArg) {
     basis: data.basis,
   };
 }
+
+/* The pure-client app carries no corpus: it reads folders in the browser. One
+   self-contained file, opened once, serves every project. */
+export function buildApp(outArg) {
+  const out = resolve(outArg || "atlas-app.html");
+  writeFileSync(out, renderAppPage());
+  return { out };
+}
+

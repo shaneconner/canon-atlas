@@ -64,20 +64,59 @@
   function reduced() {
     return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
+  /* Authored links draw solid, the primary thread of the constellation; a
+     frontmatter ref stays dashed so the two relations read apart at a glance. */
   var EDGE = {
-    link: { dash: "7 5", dist: 118, strength: 0.3, base: 0.5, w: 1.1 },
+    link: { dash: null, dist: 118, strength: 0.3, base: 0.5, w: 1.1 },
     ref: { dash: "3 3", dist: 56, strength: 0.6, base: 0.4, w: 1 },
   };
   var VERB = { link: "links to", ref: "refers to" };
   var INVERSE = { link: "linked from", ref: "referred to by" };
 
   var stage = document.getElementById("stage");
-  var side = document.getElementById("side");
+  /* The reader body; #side is the surrounding panel that also holds the tabs. */
+  var side = document.getElementById("reader");
   var app = null;
+  /* Open documents, as paths, in the order opened. They live at module scope
+     so a live refresh or a remount keeps the tab row; stale paths are pruned
+     when a corpus loads. */
+  var openTabs = [];
+  var activeTab = null;
+  /* Opens a named sidebar panel; wireChrome installs the real function. */
+  var openPanel = function () {};
+
+  /* Editing and refresh go through a backend, so the same reader and editor
+     drive both the serve API and the pure-client File System Access adapter.
+     Each method returns a promise; graph() resolves to fresh wire data, the
+     doc methods to { path, raw } or nothing. A page that provides its own
+     window.AtlasBackend (the folder app does, once a directory is picked) swaps
+     it in at mount; otherwise the built-in HTTP backend talks to the server. */
+  function httpApi(method, url, body) {
+    return fetch(url, {
+      method: method,
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    }).then(function (res) {
+      return res.json().then(function (j) {
+        if (!res.ok) throw new Error(j.error || res.statusText);
+        return j;
+      });
+    });
+  }
+  var httpBackend = {
+    graph: function () { return httpApi("GET", "/api/graph"); },
+    readDoc: function (path) { return httpApi("GET", "/api/doc?path=" + encodeURIComponent(path)); },
+    writeDoc: function (path, content) { return httpApi("PUT", "/api/doc", { path: path, content: content }); },
+    createDoc: function (path, content) { return httpApi("POST", "/api/doc", { path: path, content: content }); },
+    deleteDoc: function (path) { return httpApi("DELETE", "/api/doc?path=" + encodeURIComponent(path)); },
+  };
+  var backend = httpBackend;
 
   function init(data, keepPos) {
     var G = shapeData(data, keepPos);
-    var live = data.mode === "live";
+    // Editing needs a writable backend: the server ("live") or a picked folder
+    // ("fs"). A built chart and a read-only folder browse ("browse") are static.
+    var live = data.mode === "live" || data.mode === "fs";
     var cleanup = [];
 
     AtlasLabels.assignTiers(G.nodes);
@@ -180,7 +219,9 @@
       .attr("fill", "url(#at-vignette)").style("pointer-events", "none");
 
     var adj = {}, outOf = {}, inOf = {};
+    var addr = {};
     G.nodes.forEach(function (n) { adj[n.id] = {}; adj[n.id][n.id] = 1; outOf[n.id] = []; inOf[n.id] = []; });
+    G.nodes.forEach(function (n) { if (n.exists && n.address) addr[n.address] = n; });
     G.edges.forEach(function (e) {
       adj[e.source][e.target] = 1;
       adj[e.target][e.source] = 1;
@@ -190,41 +231,27 @@
 
     var state = { hover: null, pinned: null, mode: {}, cluster: null, query: "", k: 1, W: 0, H: 0, warmed: false };
 
-    /* Reveal: a collection configured "focus" keeps its documents off the map
-       and out of the layout until their neighbor is pinned (or a search names
-       them), so an episodic tier reads as detail on demand rather than noise.
-       Its chip cycles focus, on (drawn soft), off. */
+    /* Visibility is the key row, nothing else: a collection is on the map
+       exactly when its row in the key is on. No reveal-on-select, no
+       reveal-by-search, nothing lingering; a hidden tier is out of the layout
+       too, so it claims no empty space. A collection configured reveal "off"
+       or "focus" starts hidden. */
     var revealDefault = { unwritten: "always" };
     data.collections.forEach(function (c) { revealDefault[c.name] = c.reveal || "always"; });
     Object.keys(revealDefault).forEach(function (k) {
-      state.mode[k] = revealDefault[k] === "always" ? "on" : revealDefault[k] === "off" ? "off" : "focus";
-    });
-    var hasFocus = Object.keys(revealDefault).some(function (k) { return revealDefault[k] !== "always"; });
-
-    /* An unwritten node named only by a waiting tier would float unexplained,
-       every edge that accounts for it hidden. It follows its referrers. */
-    G.nodes.forEach(function (n) {
-      if (n.exists) return;
-      var lists = outOf[n.id].concat(inOf[n.id]);
-      n._focusOrphan =
-        lists.length > 0 &&
-        lists.every(function (l) { return revealDefault[chipKey(G.nodes[l.id])] !== "always"; });
+      state.mode[k] = revealDefault[k] === "always" ? "on" : "off";
     });
 
     function chipKey(n) { return n.exists ? n.collection : "unwritten"; }
-    function pinAdjacent(n) {
-      return !!(state.pinned && (state.pinned === n || adj[state.pinned.id][n.id]));
-    }
     function nodeVisible(n) {
-      var m = state.mode[chipKey(n)] || "on";
-      if (m === "off") return false;
-      if (m === "focus" && !pinAdjacent(n) && !(state.query && matches(n))) return false;
-      if (n._focusOrphan && !pinAdjacent(n) && !(state.query && matches(n))) {
+      if ((state.mode[chipKey(n)] || "on") === "off") return false;
+      if (!n.exists) {
+        /* An unwritten name shows only while a visible document names it. */
         var lists = outOf[n.id].concat(inOf[n.id]);
         var anyVisible = lists.some(function (l) {
           var d = G.nodes[l.id];
-          var dm = state.mode[chipKey(d)] || "on";
-          return dm === "on" || (dm === "focus" && (pinAdjacent(d) || (state.query && matches(d))));
+          if ((state.mode[chipKey(d)] || "on") === "off") return false;
+          return state.cluster == null || d.cluster === state.cluster;
         });
         if (!anyVisible) return false;
       }
@@ -232,18 +259,8 @@
       return true;
     }
     function edgeVisible(e) { return nodeVisible(e.source) && nodeVisible(e.target); }
-    /* Layout membership: like visibility, but a search hit does not join the
-       simulation, it just shows in place, so typing does not shake the sky.
-       An isolated cluster must not gain invisible mass from a reveal either. */
-    function simActive(n) {
-      var m = state.mode[chipKey(n)] || "on";
-      if (m === "off") return false;
-      if (m === "focus") {
-        if (state.cluster != null && n.cluster !== state.cluster) return false;
-        return pinAdjacent(n);
-      }
-      return true;
-    }
+    /* The simulation holds exactly what the map shows. */
+    function simActive(n) { return nodeVisible(n); }
     /* A soft node is a whole revealed tier shown at once: present, lower weight. */
     function soft(n) {
       var k = chipKey(n);
@@ -261,13 +278,19 @@
       return r;
     }
 
-    /* Per-edge gradient, so a link fades from its source hue to its target hue. */
+    /* Per-edge gradient, so a link fades from its source hue to its target
+       hue. Past a few thousand edges the gradient defs and their per-tick
+       endpoint updates dominate the mount (30,011 defs measured at 10k docs),
+       so a dense corpus draws flat source-tinted strokes instead. */
+    var FLAT_EDGES = G.edges.length > 4000;
     G.edges.forEach(function (e, i) {
-      var lg = defs.append("linearGradient").attr("id", "atl" + i).attr("gradientUnits", "userSpaceOnUse");
-      e._s0 = lg.append("stop").attr("offset", "0%").node();
-      e._s1 = lg.append("stop").attr("offset", "100%").node();
-      e._g = lg.node();
-      e._gid = "url(#atl" + i + ")";
+      if (!FLAT_EDGES) {
+        var lg = defs.append("linearGradient").attr("id", "atl" + i).attr("gradientUnits", "userSpaceOnUse");
+        e._s0 = lg.append("stop").attr("offset", "0%").node();
+        e._s1 = lg.append("stop").attr("offset", "100%").node();
+        e._g = lg.node();
+        e._gid = "url(#atl" + i + ")";
+      }
       e._fo = (i * 0.6180339887) % 1;
     });
 
@@ -306,11 +329,11 @@
 
     var linkSel = linkLayer.selectAll("path").data(G.edges).join("path")
       .attr("fill", "none")
-      .attr("stroke", function (e) { return e._gid; })
+      .attr("stroke", function (e) { return e._gid || null; })
       .attr("stroke-dasharray", function (e) { return EDGE[e.via].dash; });
 
     var flowSel = flowLayer.selectAll("circle").data(G.edges).join("circle")
-      .attr("r", 1.5).style("opacity", 0).style("pointer-events", "none");
+      .attr("r", 2.6).style("opacity", 0).style("pointer-events", "none");
 
     var haloSel = haloLayer.selectAll("circle")
       .data(G.nodes.filter(function (n) { return n.exists && !n.immutable; })).join("circle")
@@ -368,6 +391,11 @@
       });
       haloSel.attr("fill", function (n) { return n.color; });
       flowSel.attr("fill", function (e) { return G.nodes[e.source.id != null ? e.source.id : e.source].color; });
+      if (FLAT_EDGES) {
+        linkSel.attr("stroke", function (e) {
+          return G.nodes[e.source.id != null ? e.source.id : e.source].color;
+        });
+      }
     }
     drawShapes();
 
@@ -419,25 +447,135 @@
       return b;
     }
 
+    /* The documents panel: the search box (the one search: it filters this
+       list and lights the matches on the map), an order select, and every
+       document, click to read. */
+    var WIKI_ROWS = 400;
+    var wikiSearch = null;
+    var wikiOrder = "rank";
+    function renderWiki() {
+      var host = document.getElementById("wiki");
+      if (!host) return;
+      clearHost(host);
+      var all = G.nodes.filter(function (n) { return n.exists; });
+      var input = el("input", "wk-filter");
+      input.type = "search";
+      input.placeholder = "search " + all.length + " documents  ( / )";
+      wikiSearch = input;
+      host.appendChild(input);
+      var bar = el("div", "wk-bar");
+      var order = el("select", "abtn");
+      order.setAttribute("aria-label", "order documents by");
+      [["rank", "order: rank"], ["recent", "order: recent"], ["title", "order: title"]].forEach(function (o) {
+        var opt = el("option", null, o[1]);
+        opt.value = o[0];
+        order.appendChild(opt);
+      });
+      order.value = wikiOrder;
+      bar.appendChild(order);
+      var countNote = el("span", "wk-note", "");
+      bar.appendChild(countNote);
+      host.appendChild(bar);
+      var listHost = el("div");
+      host.appendChild(listHost);
+      var ORDERS = {
+        rank: function (a, b) { return b.rank - a.rank; },
+        recent: function (a, b) { return (b.date || "").localeCompare(a.date || "") || b.rank - a.rank; },
+        title: function (a, b) { return a.title.localeCompare(b.title); },
+      };
+      function renderList() {
+        clearHost(listHost);
+        state.query = input.value.trim().toLowerCase();
+        paint();
+        var q = state.query;
+        var ranked = all.slice().sort(ORDERS[wikiOrder] || ORDERS.rank);
+        var hits = q ? ranked.filter(function (n) { return n._search.indexOf(q) >= 0; }) : ranked;
+        countNote.textContent = q ? hits.length + " match" + (hits.length === 1 ? "" : "es") : "";
+        hits.slice(0, WIKI_ROWS).forEach(function (n) {
+          var row = el("button", "wk-row");
+          row.type = "button";
+          var d = el("span", "reldot");
+          d.style.background = n.color;
+          row.appendChild(d);
+          var t = el("span", "wk-title", n.title);
+          t.title = n.address;
+          row.appendChild(t);
+          row.appendChild(el("span", "wk-rank", wikiOrder === "recent" && n.date ? String(n.date).slice(0, 10) : n.collection));
+          row.addEventListener("click", function () { pin(n); });
+          listHost.appendChild(row);
+        });
+        if (hits.length > WIKI_ROWS) {
+          listHost.appendChild(el("div", "wk-note",
+            "top " + WIKI_ROWS + " of " + hits.length + "; search to reach the rest"));
+        }
+        if (q && !hits.length) listHost.appendChild(el("div", "wk-note", "no documents match"));
+      }
+      input.addEventListener("input", renderList);
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && state.query) {
+          var q = state.query;
+          var pool = all.filter(function (n) { return n._search.indexOf(q) >= 0; })
+            .sort(function (a, b) { return b.rank - a.rank; });
+          var top = pool.filter(nodeVisible)[0] || pool[0];
+          if (top) pin(top);
+        }
+        if (e.key === "Escape") {
+          input.value = "";
+          renderList();
+          input.blur();
+        }
+      });
+      order.addEventListener("change", function () { wikiOrder = order.value; renderList(); });
+      renderList();
+    }
+
+    /* The map panel: corpus stats, color mode, cluster isolation, and the key,
+       whose rows double as each collection's on/off switch. */
     function renderOverview() {
-      clearHost(side);
-      side.appendChild(el("p", "side-kind", "the corpus, entire"));
+      var ov = document.getElementById("overview");
+      if (!ov) return;
+      clearHost(ov);
+      ov.appendChild(el("p", "side-kind", (data.title || "canon-atlas") + "  ·  " + modeLabel(data.mode)));
       var real = G.nodes.filter(function (n) { return n.exists; });
-      side.appendChild(el("p", "side-title", real.length + " documents, " + G.edges.length + " references"));
+      ov.appendChild(el("p", "side-title", real.length + " documents, " + G.edges.length + " references"));
       var basisLine = {
         embeddings: "Color is the semantic cluster a document belongs to, computed from its embedding, and the layout pulls each cluster into its own region.",
+        paths: "Color is the top of a document's address, so each first-level path is a region of the map.",
         links: "Color is the neighborhood a document belongs to in the link structure, and the layout pulls each neighborhood into its own region.",
         none: "No clusters yet: add links between documents, or provide embeddings, and regions will form.",
       }[data.basis];
-      side.appendChild(el("p", "side-meta", basisLine + " Select a cluster to isolate it, or any node to read it."));
+      ov.appendChild(el("p", "side-meta", basisLine + " Select a cluster to isolate it, or any node to read it."));
       data.collections.forEach(function (c) {
-        if (state.mode[c.name] === "focus" && c.count) {
-          side.appendChild(el("p", "side-meta",
-            c.count + " " + c.name + " document" + (c.count === 1 ? "" : "s") +
-            " wait off the map; select a document to reveal the ones around it, or the " +
-            c.name + " chip to show them all."));
+        if (state.mode[c.name] === "off" && c.count) {
+          ov.appendChild(el("p", "side-meta",
+            c.count + " " + c.name + " document" + (c.count === 1 ? " is" : "s are") +
+            " off the map; the " + c.name + " row in the key turns them on."));
         }
       });
+      var crow = el("div", "edit-row");
+      var csel = el("select", "abtn");
+      csel.setAttribute("aria-label", "color by");
+      [["cluster", "color: cluster"], ["collection", "color: collection"], ["tag", "color: tag"]].forEach(function (o) {
+        var opt = el("option", null, o[1]);
+        opt.value = o[0];
+        csel.appendChild(opt);
+      });
+      // A corpus without tags has nothing for tag color to say; the option
+      // disables rather than painting everything the same grey.
+      var anyTags = G.nodes.some(function (n) { return n.exists && n.tags && n.tags.length; });
+      csel.querySelector('option[value="tag"]').disabled = !anyTags;
+      if (!anyTags && colorMode === "tag") colorMode = "cluster";
+      csel.value = colorMode;
+      csel.addEventListener("change", function () {
+        colorMode = csel.value;
+        recolor();
+        drawShapes();
+        tintLabels();
+        tick();
+        paint();
+      });
+      crow.appendChild(csel);
+      ov.appendChild(crow);
       if (data.clusters.length) {
         var key = el("div");
         data.clusters.forEach(function (c) {
@@ -446,24 +584,23 @@
           var d = el("span", "reldot");
           d.style.background = clusterColor[c.id];
           row.appendChild(d);
-          row.appendChild(el("span", null, c.label));
+          row.appendChild(el("span", null, AtlasLabels.truncateLabel(c.label)));
           row.appendChild(el("span", "clcount", String(c.size)));
           row.addEventListener("click", function (e) {
             e.stopPropagation();
             state.cluster = state.cluster === c.id ? null : c.id;
             releasePin();
-            if (hasFocus) rebindSim(0.3);
-            else sim.alpha(0.3).restart();
+            rebindSim(0.3);
             paint();
             renderOverview();
             fitToView(true);
           });
           key.appendChild(row);
         });
-        side.appendChild(el("p", "side-sec", "clusters"));
-        side.appendChild(key);
+        ov.appendChild(el("p", "side-sec", "clusters"));
+        ov.appendChild(key);
       }
-      side.appendChild(el("p", "side-sec", "key"));
+      ov.appendChild(el("p", "side-sec", "key"));
       var shapes = el("div");
       var rows = [];
       data.collections.forEach(function (c) {
@@ -473,28 +610,39 @@
         rows.push(["dashed", "unwritten", "referenced but not yet a document", G.nodes.filter(function (n) { return !n.exists; }).length]);
       }
       rows.forEach(function (r) {
-        var row = el("div", "clrow");
-        row.style.cursor = "default";
+        var name = r[1];
+        var on = state.mode[name] === "on";
+        var row = el("button", "clrow keyrow" + (on ? "" : " is-off"));
+        row.type = "button";
+        row.title = name + (on ? ": on the map, click to hide" : ": hidden, click to show");
+        row.setAttribute("aria-pressed", String(on));
         var d = el("span", "reldot");
         var neutral = mix(C.elev, C.cream, 0.62);
         if (r[0] === "orb") d.style.background = neutral;
         else if (r[0] === "ring") { d.style.border = "1.5px solid " + neutral; d.style.background = "none"; }
         else { d.style.border = "1px dashed #5c5e4d"; d.style.background = "none"; }
         row.appendChild(d);
-        row.appendChild(el("span", null, r[1]));
+        row.appendChild(el("span", null, name));
         var note = el("span", "clcount", r[3] + "  " + r[2]);
         note.style.marginLeft = "auto";
         note.style.textAlign = "right";
         row.appendChild(note);
+        row.addEventListener("click", function () {
+          state.mode[name] = state.mode[name] === "on" ? "off" : "on";
+          rebindSim(0.4);
+          paint();
+          renderOverview();
+          fitToView(true);
+        });
         shapes.appendChild(row);
       });
-      side.appendChild(shapes);
+      ov.appendChild(shapes);
       if (live) {
         var mk = el("div", "edit-row");
         var nb = el("button", "abtn", "new document");
-        nb.addEventListener("click", function () { renderCreate(); });
+        nb.addEventListener("click", function () { showReader(); renderCreate(); });
         mk.appendChild(nb);
-        side.appendChild(mk);
+        ov.appendChild(mk);
       }
     }
 
@@ -512,8 +660,114 @@
       });
     }
 
+    /* ── reader tabs ──────────────────────────────────────────────────── */
+
+    function byPath(p) {
+      return G.nodes.filter(function (n) { return n.exists && n.path === p; })[0] || null;
+    }
+    var tabsHost = document.getElementById("tabs");
+    function showReader() {
+      document.getElementById("grid").classList.remove("side-off");
+      window.dispatchEvent(new Event("resize"));
+    }
+    function hideReader() {
+      document.getElementById("grid").classList.add("side-off");
+      window.dispatchEvent(new Event("resize"));
+    }
+    function renderTabs() {
+      if (!tabsHost) return;
+      clearHost(tabsHost);
+      openTabs.forEach(function (p) {
+        var n = byPath(p);
+        if (!n) return;
+        var t = el("button", "tab" + (activeTab === p ? " is-on" : ""));
+        t.type = "button";
+        t.title = n.address || n.title;
+        var d = el("span", "reldot");
+        if (n.immutable) { d.style.border = "1.5px solid " + n.color; d.style.background = "none"; }
+        else d.style.background = n.color;
+        t.appendChild(d);
+        t.appendChild(el("span", "tab-title", n.title));
+        var x = el("span", "tab-x", "×");
+        x.title = "close";
+        x.addEventListener("click", function (e) { e.stopPropagation(); closeTab(p); });
+        t.appendChild(x);
+        t.addEventListener("click", function () { pin(n); });
+        t.addEventListener("auxclick", function (e) {
+          if (e.button === 1) { e.preventDefault(); closeTab(p); }
+        });
+        tabsHost.appendChild(t);
+      });
+      var on = tabsHost.querySelector(".tab.is-on");
+      if (on && on.scrollIntoView) on.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+    /* Every document opens into its own tab; opening again just activates it.
+       A node that is not a document (an unwritten name) shows in the reader
+       without claiming a tab. */
+    function openDocTab(n) {
+      if (!n.exists || !n.path) {
+        activeTab = null;
+        renderTabs();
+        renderNode(n);
+        showReader();
+        return;
+      }
+      if (openTabs.indexOf(n.path) < 0) openTabs.push(n.path);
+      activeTab = n.path;
+      renderTabs();
+      renderNode(n);
+      showReader();
+    }
+    function closeTab(p) {
+      var i = openTabs.indexOf(p);
+      if (i >= 0) openTabs.splice(i, 1);
+      if (activeTab !== p) { renderTabs(); return; }
+      var next = openTabs[Math.min(i, openTabs.length - 1)];
+      var n = next && byPath(next);
+      if (n) { pin(n); return; }
+      activeTab = null;
+      renderTabs();
+      clearHost(side);
+      hideReader();
+      clearPin();
+    }
+    /* Back to the active tab after a transient view (create form, an error). */
+    function showActive() {
+      var n = activeTab && byPath(activeTab);
+      if (n) { renderNode(n); return; }
+      clearHost(side);
+      hideReader();
+    }
+
     function renderNode(n) {
       clearHost(side);
+      /* Breadcrumbs for structured addresses: each parent segment is a step
+         up, landing on the document at that address when one exists and
+         otherwise filtering the search to everything under it. */
+      if (n.exists && n.address && n.address.indexOf("/") > 0) {
+        var crumbs = el("p", "crumbs");
+        var segs = n.address.split("/");
+        var acc = "";
+        segs.forEach(function (seg, i) {
+          if (i) crumbs.appendChild(el("span", "crumb-sep", "/"));
+          acc = acc ? acc + "/" + seg : seg;
+          if (i === segs.length - 1) { crumbs.appendChild(el("span", "crumb-here", seg)); return; }
+          var target = acc;
+          var b = el("button", "crumb", seg);
+          b.addEventListener("click", function () {
+            var hit = addr[target];
+            if (hit) { pin(hit); return; }
+            openPanel("wiki");
+            if (wikiSearch) {
+              wikiSearch.value = target + "/";
+              wikiSearch.dispatchEvent(new Event("input"));
+              wikiSearch.focus();
+            }
+          });
+          crumbs.appendChild(b);
+        });
+        side.appendChild(crumbs);
+      }
       var kind = n.exists ? n.collection + (n.immutable ? ", immutable" : "") : "unwritten reference";
       side.appendChild(el("p", "side-kind", kind));
       var t = el("p", "side-title", n.title);
@@ -550,11 +804,20 @@
           eb.addEventListener("click", function () { renderEditor(n); });
           row.appendChild(eb);
           var db = el("button", "abtn danger", "delete");
-          var armed = false;
+          var armed = false, disarm = 0;
           db.addEventListener("click", function () {
-            if (!armed) { armed = true; db.textContent = "really delete?"; return; }
-            api("DELETE", "/api/doc?path=" + encodeURIComponent(n.path)).then(function () {
+            if (!armed) {
+              /* Two clicks to delete, and the arming wears off, so a stray
+                 click minutes later cannot land on a loaded button. */
+              armed = true;
+              db.textContent = "really delete?";
+              disarm = setTimeout(function () { armed = false; db.textContent = "delete"; }, 4000);
+              return;
+            }
+            clearTimeout(disarm);
+            backend.deleteDoc(n.path).then(function () {
               state.pinned = null;
+              pushHash(null);
               refresh();
             }).catch(showErr);
           });
@@ -594,21 +857,8 @@
       side.insertBefore(p, side.firstChild);
     }
 
-    function api(method, url, body) {
-      return fetch(url, {
-        method: method,
-        headers: body ? { "Content-Type": "application/json" } : undefined,
-        body: body ? JSON.stringify(body) : undefined,
-      }).then(function (res) {
-        return res.json().then(function (j) {
-          if (!res.ok) throw new Error(j.error || res.statusText);
-          return j;
-        });
-      });
-    }
-
     function renderEditor(n) {
-      api("GET", "/api/doc?path=" + encodeURIComponent(n.path)).then(function (doc) {
+      backend.readDoc(n.path).then(function (doc) {
         clearHost(side);
         side.appendChild(el("p", "side-kind", "editing " + n.collection));
         side.appendChild(el("p", "side-path", n.path));
@@ -618,7 +868,7 @@
         var row = el("div", "edit-row");
         var save = el("button", "abtn", "save");
         save.addEventListener("click", function () {
-          api("PUT", "/api/doc", { path: n.path, content: area.value }).then(function () {
+          backend.writeDoc(n.path, area.value).then(function () {
             refresh(n.path);
           }).catch(showErr);
         });
@@ -631,6 +881,44 @@
       }).catch(showErr);
     }
 
+    /* The collection a path would land in: longest matching prefix claims it,
+       the same rule the pipeline sorts files by. */
+    function collFor(p) {
+      var best = null;
+      data.collections.forEach(function (c) {
+        if (p.indexOf(c.match) === 0 && (!best || c.match.length > best.match.length)) best = c;
+      });
+      return best;
+    }
+
+    /* A new document should read like its siblings: frontmatter keys the
+       collection's documents actually carry (under the corpus's own names),
+       and a title heading. Majority rules; a bare notes folder stays bare. */
+    function templateFor(coll, seedTitle) {
+      var f = (coll && coll.fields) || {};
+      var sibs = coll
+        ? G.nodes.filter(function (n) { return n.exists && n.collection === coll.name; })
+        : [];
+      function most(has) {
+        var c = 0;
+        sibs.forEach(function (n) { if (has(n)) c++; });
+        return c * 2 > sibs.length;
+      }
+      var lines = [];
+      if (sibs.length) {
+        if (most(function (n) { return n.summary; })) lines.push((f.summary || "summary") + ": ");
+        if (most(function (n) { return n.date; })) {
+          lines.push((f.date || "date") + ": " + new Date().toISOString().slice(0, 10));
+        }
+        if (most(function (n) { return n.tags && n.tags.length; })) lines.push((f.tags || "tags") + ": []");
+        /* Only a corpus that renamed the refs key (journal's "subject") writes
+           refs in frontmatter; the default name means body links carry them. */
+        if (f.refs && f.refs !== "refs") lines.push(f.refs + ": []");
+      }
+      var fm = lines.length ? "---\n" + lines.join("\n") + "\n---\n\n" : "";
+      return fm + "# " + (seedTitle || "") + "\n";
+    }
+
     function renderCreate(seedTitle) {
       clearHost(side);
       side.appendChild(el("p", "side-kind", "new document"));
@@ -641,17 +929,22 @@
       path.placeholder = prefix + "name.md";
       side.appendChild(path);
       var area = el("textarea", "edit-area");
-      area.value = seedTitle ? "# " + seedTitle + "\n\n" : "";
+      area.value = templateFor(collFor(path.value.trim()) || mutable[0] || null, seedTitle);
+      var touched = false;
+      area.addEventListener("input", function () { touched = true; });
+      path.addEventListener("input", function () {
+        if (!touched) area.value = templateFor(collFor(path.value.trim()) || mutable[0] || null, seedTitle);
+      });
       side.appendChild(area);
       var row = el("div", "edit-row");
       var save = el("button", "abtn", "create");
       save.addEventListener("click", function () {
-        api("POST", "/api/doc", { path: path.value.trim(), content: area.value }).then(function () {
+        backend.createDoc(path.value.trim(), area.value).then(function () {
           refresh(path.value.trim());
         }).catch(showErr);
       });
       var cancel = el("button", "abtn", "cancel");
-      cancel.addEventListener("click", function () { renderOverview(); });
+      cancel.addEventListener("click", function () { showActive(); });
       row.appendChild(save);
       row.appendChild(cancel);
       side.appendChild(row);
@@ -660,55 +953,39 @@
 
     /* ── focus, zoom, fit ─────────────────────────────────────────────── */
 
-    /* Whether selecting this node changes layout membership: it is itself a
-       waiting tier member, or it has neighbors in one. Pins that reveal nothing
-       must not reheat the sky. */
-    function pinReveals(n) {
-      if (!hasFocus) return false;
-      if (revealDefault[chipKey(n)] !== "always") return true;
-      var lists = outOf[n.id].concat(inOf[n.id]);
-      for (var i = 0; i < lists.length; i++) {
-        var m = G.nodes[lists[i].id];
-        if (revealDefault[chipKey(m)] !== "always" && state.mode[chipKey(m)] === "focus") return true;
-      }
-      return false;
-    }
-    var revealedByPin = false;
     function pin(n) {
       if (state.pinned && state.pinned !== n) { state.pinned.fx = null; state.pinned.fy = null; }
       state.pinned = n;
-      if (pinReveals(n)) {
-        /* Hold the selected node still while its satellites bloom, so the
-           centreOn transition lands where it aimed. */
-        n.fx = n.x;
-        n.fy = n.y;
-        revealedByPin = true;
-        rebindSim(0.35);
-      }
+      /* Hold the selected node still: what you are reading must not drift. */
+      if (n.x != null) { n.fx = n.x; n.fy = n.y; }
       paint();
-      renderNode(n);
-      centreOn(n);
+      openDocTab(n);
+      if (nodeVisible(n)) centreOn(n);
+      if (n.exists && n.path) pushHash(n.path);
     }
     function centreOn(n) {
       if (n.x == null) return;
       var k = Math.max(state.k || 1, 1.15);
-      var t = d3.zoomIdentity.translate(state.W / 2 - k * n.x, state.H / 2 - k * n.y).scale(k);
-      if (reduced()) svg.call(zoom.transform, t);
-      else svg.transition().duration(650).ease(d3.easeCubicInOut).call(zoom.transform, t);
+      var target = function () {
+        return d3.zoomIdentity.translate(state.W / 2 - k * n.x, state.H / 2 - k * n.y).scale(k);
+      };
+      if (reduced()) { svg.call(zoom.transform, target()); return; }
+      /* The pinned node is held still, so the flight's aim is stable; the end
+         snap re-reads position and stage size, covering anything that moved
+         or resized mid-flight. (Never re-apply zoom.transform per frame from
+         inside a tween: on a plain selection it interrupts its own flight.) */
+      svg.transition().duration(650).ease(d3.easeCubicInOut).call(zoom.transform, target)
+        .on("end", function () { svg.call(zoom.transform, target()); });
     }
     function releasePin() {
       if (state.pinned) { state.pinned.fx = null; state.pinned.fy = null; }
       state.pinned = null;
-      if (revealedByPin) {
-        revealedByPin = false;
-        rebindSim(0.2);
-      }
     }
     function clearPin() {
       if (!state.pinned) return;
       releasePin();
       paint();
-      renderOverview();
+      pushHash(null);
     }
 
     /* ── label placement ──────────────────────────────────────────────── */
@@ -792,7 +1069,13 @@
           }
           if (clear) { placed.push(box); show[n.id] = 1; n._at = CAND[c]; return; }
         }
-        if (f === n) { show[n.id] = 1; n._at = CAND[0]; }
+        /* The focused node and the sky's anchors (tier zero, the biggest)
+           keep their names even when crowded; later labels avoid their box. */
+        if (f === n || n._minK === 0) {
+          placed.push(candBox(n, CAND[0], cx, cy, w, h, t.k));
+          show[n.id] = 1;
+          n._at = CAND[0];
+        }
       });
       labelSel
         .style("display", function (n) { return nodeVisible(n) ? null : "none"; })
@@ -814,6 +1097,20 @@
         ring.attr("cx", state.pinned.x).attr("cy", state.pinned.y)
           .attr("r", radius(state.pinned) + 5).attr("stroke-width", 1.2 / k).style("opacity", 0.9);
       } else ring.style("opacity", 0);
+
+      /* The sky can be dragged or zoomed clean out of view; when no visible
+         node is on screen, offer the way back where the eye is looking. */
+      var lostBtn = document.getElementById("lost");
+      if (lostBtn) {
+        var anyOn = false;
+        for (var li = 0; li < G.nodes.length && !anyOn; li++) {
+          var ln = G.nodes[li];
+          if (ln.x == null || !nodeVisible(ln)) continue;
+          var lx = ln.x * t.k + t.x, ly = ln.y * t.k + t.y;
+          if (lx > -20 && lx < state.W + 20 && ly > -20 && ly < state.H + 20) anyOn = true;
+        }
+        lostBtn.hidden = anyOn;
+      }
     }
 
     function curve(e) {
@@ -830,14 +1127,16 @@
     }
     function tick() {
       linkSel.attr("d", curve);
-      G.edges.forEach(function (e) {
-        e._g.setAttribute("x1", e.source.x);
-        e._g.setAttribute("y1", e.source.y);
-        e._g.setAttribute("x2", e.target.x);
-        e._g.setAttribute("y2", e.target.y);
-        e._s0.setAttribute("stop-color", e.source.color);
-        e._s1.setAttribute("stop-color", e.target.color);
-      });
+      if (!FLAT_EDGES) {
+        G.edges.forEach(function (e) {
+          e._g.setAttribute("x1", e.source.x);
+          e._g.setAttribute("y1", e.source.y);
+          e._g.setAttribute("x2", e.target.x);
+          e._g.setAttribute("y2", e.target.y);
+          e._s0.setAttribute("stop-color", e.source.color);
+          e._s1.setAttribute("stop-color", e.target.color);
+        });
+      }
       haloSel.attr("cx", function (n) { return n.x; }).attr("cy", function (n) { return n.y; });
       nodeSel.attr("transform", function (n) { return "translate(" + n.x + "," + n.y + ")"; });
       labelSel.attr("x", function (n) { return n.x; }).attr("y", function (n) { return n.y; });
@@ -852,6 +1151,8 @@
         paint();
       });
     svg.call(zoom).on("dblclick.zoom", null);
+    /* Double-clicking the sky reframes it: the always-there way home. */
+    svg.on("dblclick", function () { fitToView(true); });
 
     function fitToView(animate) {
       var vis = G.nodes.filter(nodeVisible);
@@ -868,94 +1169,31 @@
       else svg.call(zoom.transform, t);
     }
 
-    var raf = null, PERIOD = 3400;
+    var raf = null, PERIOD = 3400, BREATH = 5200;
     function frame(now) {
       var phase = (now % PERIOD) / PERIOD, k = state.k || 1;
+      /* The sky breathes: one slow opacity swell over the whole link layer,
+         a single write per frame whatever the corpus size. */
+      linkLayer.attr("opacity", 0.9 + 0.1 * Math.sin(((now % BREATH) / BREATH) * 2 * Math.PI));
       flowSel.each(function (e) {
         var o = e._flowOp || 0;
         if (o <= 0.02 || e.source.x == null) { this.style.opacity = 0; return; }
         var t = (phase + e._fo) % 1, p = flowPoint(e, t);
         this.setAttribute("cx", p[0]);
         this.setAttribute("cy", p[1]);
-        this.setAttribute("r", 1.5 / k);
+        this.setAttribute("r", 2.6 / k);
         this.style.opacity = o * (0.3 + 0.7 * Math.sin(Math.PI * t));
       });
       raf = requestAnimationFrame(frame);
     }
     function startFlow() { if (reduced() || raf != null) return; raf = requestAnimationFrame(frame); }
-    function stopFlow() { if (raf != null) { cancelAnimationFrame(raf); raf = null; } flowSel.style("opacity", 0); }
+    function stopFlow() {
+      if (raf != null) { cancelAnimationFrame(raf); raf = null; }
+      flowSel.style("opacity", 0);
+      linkLayer.attr("opacity", 1);
+    }
 
     /* ── header wiring ────────────────────────────────────────────────── */
-
-    var chipsHost = document.getElementById("chips");
-    clearHost(chipsHost);
-    var chipDefs = data.collections.map(function (c) { return c.name; });
-    if (G.nodes.some(function (n) { return !n.exists; })) chipDefs.push("unwritten");
-    chipDefs.forEach(function (name) {
-      var b = el("button", "chip", name);
-      function paintChip() {
-        var m = state.mode[name];
-        b.classList.toggle("is-on", m === "on");
-        b.classList.toggle("is-focus", m === "focus");
-        b.setAttribute("aria-pressed", m === "on" ? "true" : m === "focus" ? "mixed" : "false");
-        b.title =
-          m === "focus" ? name + ": revealed around the selected document" :
-          m === "on" ? name + ": shown" : name + ": hidden";
-      }
-      paintChip();
-      b.addEventListener("click", function () {
-        var cur = state.mode[name];
-        if (revealDefault[name] === "always") state.mode[name] = cur === "on" ? "off" : "on";
-        else state.mode[name] = cur === "focus" ? "on" : cur === "on" ? "off" : "focus";
-        paintChip();
-        if (state.pinned && !nodeVisible(state.pinned)) clearPin();
-        rebindSim(0.4);
-        paint();
-      });
-      chipsHost.appendChild(b);
-    });
-
-    var colorSel = document.getElementById("colorby");
-    colorSel.value = colorMode;
-    function onColor() {
-      colorMode = colorSel.value;
-      recolor();
-      drawShapes();
-      tintLabels();
-      tick();
-      paint();
-    }
-    colorSel.addEventListener("change", onColor);
-    cleanup.push(function () { colorSel.removeEventListener("change", onColor); });
-
-    var search = document.getElementById("search");
-    var countEl = document.getElementById("count");
-    function onSearch() {
-      state.query = search.value.trim().toLowerCase();
-      if (state.query) {
-        var hits = G.nodes.filter(function (n) { return nodeVisible(n) && matches(n); });
-        countEl.textContent = hits.length + " match" + (hits.length === 1 ? "" : "es");
-      } else countEl.textContent = "";
-      paint();
-    }
-    function onSearchKey(e) {
-      if (e.key === "Enter") {
-        var hits = G.nodes.filter(function (n) { return nodeVisible(n) && matches(n); })
-          .sort(function (a, b) { return b.rank - a.rank; });
-        if (hits.length && state.query) pin(hits[0]);
-      }
-      if (e.key === "Escape") {
-        search.value = "";
-        onSearch();
-        search.blur();
-      }
-    }
-    search.addEventListener("input", onSearch);
-    search.addEventListener("keydown", onSearchKey);
-    cleanup.push(function () {
-      search.removeEventListener("input", onSearch);
-      search.removeEventListener("keydown", onSearchKey);
-    });
 
     var refit = document.getElementById("refit");
     function onRefit() {
@@ -964,13 +1202,25 @@
       paint();
       renderOverview();
       fitToView(true);
+      pushHash(null);
     }
     refit.addEventListener("click", onRefit);
     cleanup.push(function () { refit.removeEventListener("click", onRefit); });
 
+    var lost = document.getElementById("lost");
+    function onLost() { fitToView(true); paint(); }
+    if (lost) {
+      lost.addEventListener("click", onLost);
+      cleanup.push(function () { lost.removeEventListener("click", onLost); });
+    }
+
     function onDocKey(e) {
-      if (e.target === search || /INPUT|TEXTAREA/.test(e.target.tagName)) return;
-      if (e.key === "/" || e.key === "f") { e.preventDefault(); search.focus(); }
+      if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+      if (e.key === "/" || e.key === "f") {
+        e.preventDefault();
+        openPanel("wiki");
+        if (wikiSearch) wikiSearch.focus();
+      }
       if (e.key === "Escape") clearPin();
     }
     document.addEventListener("keydown", onDocKey);
@@ -979,7 +1229,7 @@
     /* ── live refresh ─────────────────────────────────────────────────── */
 
     function refresh(focusPath) {
-      api("GET", "/api/graph").then(function (fresh) {
+      backend.graph().then(function (fresh) {
         var pos = {};
         G.nodes.forEach(function (n) { if (n.x != null) pos[n.exists ? n.path : "?" + n.title.toLowerCase()] = { x: n.x, y: n.y }; });
         destroy();
@@ -1000,9 +1250,11 @@
       computeAnchors();
       sim.force("x", d3.forceX(ax).strength(astr)).force("y", d3.forceY(ay).strength(astr));
     }
+    /* A panel opening or a grip drag resizes the stage; the camera holds its
+       place instead of snapping to fit, so opening a panel never yanks the sky
+       out from under you. Refit stays a deliberate act. */
     function onResize() {
       size();
-      fitToView(false);
       paint();
     }
     window.addEventListener("resize", onResize);
@@ -1010,7 +1262,12 @@
 
     size();
     rebindSim();
-    for (var i = 0; i < 520; i++) sim.tick();
+    /* Warm-up cost is ticks times nodes; a dense corpus converges enough in
+       fewer passes, and the ticks saved are the difference between a mount
+       and a coffee break. */
+    var active = sim.nodes().length;
+    var WARM = active > 6000 ? 180 : active > 2000 ? 300 : 520;
+    for (var i = 0; i < WARM; i++) sim.tick();
     /* A tier waiting on reveal never warmed, so park each such document beside
        a settled neighbor it will bloom from; physics takes over on reveal. Two
        passes let a satellite whose only neighbor is another satellite park
@@ -1041,6 +1298,14 @@
     tick();
     measureLabels();
     renderOverview();
+    renderWiki();
+    /* Restore the tab row: stale paths (a deleted document, another corpus)
+       drop out, and the reader shows only when something is open. */
+    openTabs = openTabs.filter(function (p) { return byPath(p); });
+    if (activeTab && !byPath(activeTab)) activeTab = openTabs.length ? openTabs[openTabs.length - 1] : null;
+    renderTabs();
+    if (activeTab) { renderNode(byPath(activeTab)); showReader(); }
+    else { clearHost(side); hideReader(); }
     fitToView(false);
     paint();
     startFlow();
@@ -1054,9 +1319,21 @@
       cleanup.forEach(function (fn) { fn(); });
       svg.remove();
       clearHost(side);
+      ["wiki", "overview", "tabs"].forEach(function (id) {
+        var h = document.getElementById(id);
+        if (h) clearHost(h);
+      });
     }
 
-    return { G: G, pin: pin, destroy: destroy, refresh: refresh };
+    return {
+      G: G,
+      pin: pin,
+      clearPin: clearPin,
+      destroy: destroy,
+      refresh: refresh,
+      byPath: byPath,
+      pinnedPath: function () { return (state.pinned && state.pinned.path) || null; },
+    };
   }
 
   /* Turn the wire DATA into live structures: nodes get search text and a
@@ -1085,8 +1362,135 @@
     return { nodes: nodes, edges: data.edges, resolve: resolve };
   }
 
-  document.getElementById("brand").innerHTML =
-    (DATA.title ? DATA.title.replace(/[<>&]/g, "") : "canon-atlas") +
-    "<small>" + (DATA.mode === "live" ? "live" : "chart") + "</small>";
-  app = init(DATA, null);
+  /* Reading history: every document you open becomes a browser history entry
+     (a hash on the page URL), so the browser's own back and forward walk the
+     trail of articles you read, and a reloaded tab reopens where it was.
+     Hash-only navigation works in every mode, including a chart on file://. */
+  var applyingHash = false;
+  function hashDoc() {
+    return location.hash.indexOf("#d=") === 0 ? decodeURIComponent(location.hash.slice(3)) : null;
+  }
+  function pushHash(path) {
+    if (applyingHash) return;
+    var want = path ? "#d=" + encodeURIComponent(path) : "";
+    if (location.hash === want || (!want && !location.hash)) return;
+    location.hash = want;
+  }
+  function onHashChange() {
+    if (!app) return;
+    var p = hashDoc();
+    applyingHash = true;
+    if (p) {
+      var hit = app.byPath(p);
+      if (hit && app.pinnedPath() !== p) app.pin(hit);
+    } else app.clearPin();
+    applyingHash = false;
+  }
+
+  /* Panel chrome: the rail's icon buttons own the sidebar panels (click to
+     open, click again to close), the reader appears when a document opens,
+     and both regions resize by their grips. Wired once; geometry survives
+     refresh and remount. Everything starts closed: the constellation is the
+     opening view. */
+  function wireChrome() {
+    var grid = document.getElementById("grid");
+    if (!grid || grid._wired) return;
+    grid._wired = true;
+    grid.classList.add("sb-off");
+    grid.classList.add("side-off");
+    var panels = { wiki: "rail-wiki", overview: "rail-map", folders: "rail-folders" };
+    var active = null;
+    function setPanel(name) {
+      active = name;
+      Object.keys(panels).forEach(function (k) {
+        var p = document.getElementById(k);
+        if (p) p.style.display = k === name ? "" : "none";
+        var b = document.getElementById(panels[k]);
+        if (b) {
+          b.classList.toggle("is-on", k === name);
+          b.setAttribute("aria-pressed", String(k === name));
+        }
+      });
+      grid.classList.toggle("sb-off", !name);
+      window.dispatchEvent(new Event("resize"));
+    }
+    Object.keys(panels).forEach(function (k) {
+      var b = document.getElementById(panels[k]);
+      if (b) b.addEventListener("click", function () { setPanel(active === k ? null : k); });
+    });
+    setPanel(null);
+    openPanel = setPanel;
+    function grip(id, varName, fromLeft, min, max) {
+      var g = document.getElementById(id);
+      if (!g) return;
+      g.addEventListener("mousedown", function (e) {
+        e.preventDefault();
+        g.classList.add("dragging");
+        /* Live resize, one update per animation frame: the panels and their
+           text adapt while you hold, and the expensive svg refit waits for
+           release so the drag stays smooth on a busy machine. */
+        var pendingW = null, rafId = null;
+        function width(ev) {
+          var w = fromLeft ? ev.clientX - 44 : window.innerWidth - ev.clientX;
+          var mx = typeof max === "function" ? max() : max;
+          return Math.max(min, Math.min(mx, w));
+        }
+        function apply() {
+          rafId = null;
+          if (pendingW != null) grid.style.setProperty(varName, pendingW + "px");
+        }
+        pendingW = width(e);
+        apply();
+        function move(ev) {
+          pendingW = width(ev);
+          if (rafId == null) rafId = requestAnimationFrame(apply);
+        }
+        function up() {
+          g.classList.remove("dragging");
+          if (rafId != null) cancelAnimationFrame(rafId);
+          apply();
+          window.removeEventListener("mousemove", move);
+          window.removeEventListener("mouseup", up);
+          window.dispatchEvent(new Event("resize"));
+        }
+        window.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", up);
+      });
+    }
+    grip("sbgrip", "--sb-w", true, 190, 560);
+    /* The reader can take up to half the screen: reading and editing want room. */
+    grip("sidegrip", "--side-w", false, 240, function () { return Math.round(window.innerWidth / 2); });
+  }
+
+  /* Mount point: the chart and serve pages carry a global DATA and boot at once;
+     the folder app has no DATA until a directory is picked, so it sets its own
+     backend and calls AtlasApp.mount with the data the shared pipeline built.
+     A second mount (switching folders in place) tears the first one down. */
+  function modeLabel(mode) {
+    return mode === "live" ? "live" : mode === "chart" ? "chart" : mode === "browse" ? "folder, read only" : "folder";
+  }
+  window.AtlasApp = {
+    mount: function (data, be) {
+      if (be) backend = be;
+      else if (typeof AtlasBackend !== "undefined") backend = AtlasBackend;
+      if (app) app.destroy();
+      app = init(data, null);
+      /* A hash carried into the mount reopens that document: a reloaded tab
+         lands where it was, and a stale hash from another corpus is dropped. */
+      var p = hashDoc();
+      if (p) {
+        var hit = app.byPath(p);
+        applyingHash = true;
+        if (hit) app.pin(hit);
+        else {
+          try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+        }
+        applyingHash = false;
+      }
+      return app;
+    },
+  };
+  wireChrome();
+  window.addEventListener("hashchange", onHashChange);
+  if (typeof DATA !== "undefined") window.AtlasApp.mount(DATA);
 })();

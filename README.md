@@ -60,6 +60,10 @@ To define your own, put a `canon-atlas.json` at the root:
 
 References that resolve nowhere are not errors: they render as dashed, unwritten nodes, because a name the corpus reaches for but has not written yet is a fact worth seeing. In live mode an unwritten node offers to be written.
 
+### The article schema
+
+A store may carry a `schema.json` beside its collections ([pi-canon](https://github.com/shaneconner/pi-canon) writes one when it creates a store), declaring rules for an article's `capsule`, `title`, and `body`: `required`, `min_chars`, `max_chars`, and a `hint`. The atlas enforces the same contract at every one of its write doors. Enforcement is asymmetric on purpose: a `required` rule rejects a save that touches the field (and everything on create), with nothing written and the editor keeping your text while it tells you what to correct; every other rule warns, and a document already in violation shows heal notes in the reader instead of errors, so a body edit is never held hostage to a legacy omission. A malformed `schema.json` fails open and loud: nothing is enforced, and the map panel and every save say so, because a contract the owner believes is enforced while a typo disabled it is the worst state.
+
 ## Color
 
 Color is the cluster a document belongs to, sampled from one perceptual ramp (Batlow), and the force layout pulls each cluster into its own region, so a band of the palette and a region of the map mean the same thing.

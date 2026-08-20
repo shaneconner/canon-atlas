@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -152,6 +152,185 @@ function corpus(name, files) {
   const wl = graph.edges.find((e) => e.via === "link");
   assert.equal(graph.nodes[wl.target].address, "pi-canon/design_decisions");
   pass("refs and wikilinks resolve across collections by address");
+}
+
+{
+  // A pi-canon store nested under .canon/ at a repo root must be found where
+  // it actually lives, with the collections claiming the nested paths.
+  const root = corpus("nestedpreset", {
+    ".canon/articles/lab/evolving-canon.md": '---\ncapsule: "Lab line."\n---\nBody.\n',
+    ".canon/journal/2026-08-19-entry.md":
+      "---\nsubject: [lab/evolving-canon]\nlogged: 2026-08-19T10:00:00Z\n---\nAn event.\n",
+    "README.md": "# Repo\n",
+  });
+  const config = loadConfig(root);
+  assert.equal(config.preset, "pi-canon");
+  assert.equal(collectionFor(config, ".canon/articles/x.md").name, "articles");
+  assert.equal(collectionFor(config, ".canon/journal/2026-01-01-x.md").name, "journal");
+  assert.equal(config.collections.find((c) => c.name === "journal").immutable, true);
+  const flat = corpus("nestedpresetflat", { "README.md": "# Repo\n", "docs/a.md": "# A\n" });
+  assert.equal(loadConfig(flat).preset, "default");
+  pass("a repo root holding .canon/articles/ and .canon/journal/ gets the pi-canon preset on the nested paths");
+}
+
+/* --- article schema ------------------------------------------------------------- */
+
+{
+  // The store's schema.json is pi-canon's contract, enforced by the shared
+  // pipeline: a required violation rejects only when the save touched the field
+  // or created the document, everything else warns, and a malformed declaration
+  // fails open and loud.
+  const good = pipeline.parseSchema(JSON.stringify({
+    schema_version: 1,
+    article: {
+      capsule: { required: true, max_chars: 40, hint: "one dense line" },
+      title: { required: true },
+      body: { min_chars: 10 },
+    },
+  }));
+  assert.deepEqual(good.problems, []);
+  const s = good.schema;
+
+  const ok = pipeline.checkDoc("---\ncapsule: fine\n---\n# T\nA long enough body.\n", null, s, "capsule");
+  assert.deepEqual(ok.rejects, []);
+  assert.deepEqual(ok.warns, []);
+
+  const created = pipeline.checkDoc("# T\nbody text here\n", null, s, "capsule");
+  assert.deepEqual(created.rejects, ["capsule is required (one dense line)"]);
+
+  // A body edit is never held hostage to a legacy missing capsule.
+  const edited = pipeline.checkDoc("# T\nnew body that is long\n", "# T\nold body that is long\n", s, "capsule");
+  assert.deepEqual(edited.rejects, []);
+  assert.ok(edited.warns.some((w) => w.includes("capsule is required and missing")));
+
+  // Removing the capsule touches it: reject.
+  const removed = pipeline.checkDoc(
+    "# T\nbody is long enough\n",
+    "---\ncapsule: had one\n---\n# T\nbody is long enough\n",
+    s,
+    "capsule"
+  );
+  assert.deepEqual(removed.rejects, ["capsule is required (one dense line)"]);
+
+  // Length rules warn, never reject.
+  const caps = pipeline.checkDoc("---\ncapsule: " + "x".repeat(60) + "\n---\n# T\nshort\n", null, s, "capsule");
+  assert.deepEqual(caps.rejects, []);
+  assert.ok(caps.warns.some((w) => w.includes("capsule is over 40")));
+  assert.ok(caps.warns.some((w) => w.includes("body is under 10")));
+
+  // The title rule reads the leading heading only, as pi-canon does.
+  const late = pipeline.checkDoc("---\ncapsule: fine\n---\nintro line\n# Late\nbody long enough\n", null, s, "capsule");
+  assert.ok(late.rejects.some((r) => r.indexOf("title is required") === 0));
+
+  const bad = pipeline.parseSchema("{ not json");
+  assert.equal(bad.schema, undefined);
+  assert.ok(bad.problems[0].includes("not valid JSON"));
+  const odd = pipeline.parseSchema(JSON.stringify({ article: { capsule: { requierd: true }, subtitle: {} } }));
+  assert.equal(odd.problems.length, 2);
+  assert.deepEqual(odd.schema.capsule, {});
+  pass("the article schema enforces asymmetrically: touched required rejects, the rest warns, malformed fails open and loud");
+}
+
+{
+  // The whole contract end to end: heal notes in the wire data (Node and
+  // browser byte-identical), rejection at the serve door with nothing written
+  // and the editor's text therefore intact, warnings beside a permitted save,
+  // and the journal untouched by article rules.
+  const schemaFile = JSON.stringify({
+    schema_version: 1,
+    article: { capsule: { required: true, hint: "one dense line" } },
+  });
+  const docs = {
+    "articles/good.md": "---\ncapsule: Fine.\n---\n# Good\nBody.\n",
+    "articles/legacy.md": "# Legacy\nNo capsule yet.\n",
+    "journal/2026-08-19-e.md": "---\nsubject: [good]\n---\nEvent.\n",
+  };
+  const root = corpus("schemad", { ...docs, "schema.json": schemaFile });
+
+  const config = loadConfig(root);
+  config.vectors = loadVectors(root, config);
+  const data = buildData(config, buildGraph(scanCorpus(root, config)), "live");
+  const legacy = data.nodes.find((n) => n.path === "articles/legacy.md");
+  assert.ok(legacy.schemaNotes.some((w) => w.includes("capsule is required and missing")));
+  assert.equal(data.nodes.find((n) => n.path === "articles/good.md").schemaNotes, undefined);
+  assert.equal(data.nodes.find((n) => n.collection === "journal").schemaNotes, undefined);
+  const wire = pipeline.buildWireData(
+    Object.entries(docs).map(([path, text]) => ({ path, text })),
+    { configJson: null, vectorsJson: null, schemaTexts: { root: schemaFile, nested: null }, mode: "live" }
+  );
+  assert.equal(JSON.stringify(wire), JSON.stringify(data), "browser and Node must agree on heal notes byte for byte");
+  pass("a violating document carries heal notes in the wire data, identically from Node and the browser");
+
+  const { server, port } = await serve(root, 0);
+  const base = `http://127.0.0.1:${port}`;
+  const j = (r) => r.json();
+  const jsonReq = (method, body) => ({
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  let res = await fetch(base + "/api/doc", jsonReq("POST", { path: "articles/new.md", content: "# New\nBody.\n" }));
+  assert.equal(res.status, 422);
+  assert.ok((await j(res)).error.startsWith("Write rejected by this store's schema.json:"));
+  assert.ok(!existsSync(join(root, "articles/new.md")), "a rejected create must write nothing");
+
+  res = await fetch(base + "/api/doc", jsonReq("POST", { path: "articles/new.md", content: "---\ncapsule: New.\n---\n# New\nBody.\n" }));
+  assert.equal(res.status, 201);
+  assert.equal((await j(res)).warnings, undefined);
+
+  res = await fetch(base + "/api/doc", jsonReq("PUT", { path: "articles/legacy.md", content: "# Legacy\nEdited body.\n" }));
+  assert.equal(res.status, 200);
+  assert.ok((await j(res)).warnings.some((w) => w.includes("capsule is required and missing")));
+
+  res = await fetch(base + "/api/doc", jsonReq("PUT", { path: "articles/good.md", content: "# Good\nBody.\n" }));
+  assert.equal(res.status, 422);
+  assert.ok(readFileSync(join(root, "articles/good.md"), "utf8").includes("capsule: Fine."), "a rejected edit must leave the document alone");
+
+  res = await fetch(base + "/api/doc", jsonReq("POST", { path: "journal/2026-08-20-n.md", content: "---\nsubject: [good]\n---\nNew event.\n" }));
+  assert.equal(res.status, 201, "article rules must not claim the journal");
+  server.close();
+  pass("the write door rejects a touched required violation with nothing written, and warns on the rest");
+}
+
+{
+  // A nested store's contract lives beside its collections; a stray file at
+  // the repo root is not it. A malformed declaration enforces nothing, and
+  // says so on the wire and beside every write.
+  const nested = corpus("schemanest", {
+    ".canon/articles/a.md": "# A\nBody.\n",
+    ".canon/journal/2026-08-19-e.md": "---\nsubject: [a]\n---\nE.\n",
+    ".canon/schema.json": JSON.stringify({ article: { capsule: { required: true } } }),
+    "schema.json": "{ this stray root file is not the store's contract",
+  });
+  const nc = loadConfig(nested);
+  assert.equal(nc.schema.capsule.required, true);
+  assert.deepEqual(nc.schemaProblems, []);
+  nc.vectors = null;
+  const nd = buildData(nc, buildGraph(scanCorpus(nested, nc)), "live");
+  assert.ok(nd.nodes.find((n) => n.path === ".canon/articles/a.md").schemaNotes.length);
+
+  const bad = corpus("schemabad", {
+    "articles/a.md": "# A\n",
+    "journal/2026-08-19-e.md": "---\nsubject: [a]\n---\nE.\n",
+    "schema.json": "{ nope",
+  });
+  const bc = loadConfig(bad);
+  assert.equal(bc.schema, undefined);
+  assert.ok(bc.schemaProblems[0].includes("not valid JSON"));
+  bc.vectors = null;
+  const bd = buildData(bc, buildGraph(scanCorpus(bad, bc)), "live");
+  assert.ok(bd.schemaProblems[0].includes("not valid JSON"));
+  const { server, port } = await serve(bad, 0);
+  const res = await fetch(`http://127.0.0.1:${port}/api/doc`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: "articles/b.md", content: "# B\n" }),
+  });
+  assert.equal(res.status, 201, "a malformed schema must not block writes");
+  assert.ok((await res.json()).warnings[0].includes("not valid JSON"), "but every write must say it is not enforced");
+  server.close();
+  pass("a nested store's schema sits beside it, and a malformed one fails open and loud");
 }
 
 {

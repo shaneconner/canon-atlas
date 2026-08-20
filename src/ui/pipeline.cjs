@@ -96,13 +96,22 @@ var AtlasPipeline = (function () {
   }
 
   function detectPreset(relPaths) {
-    let hasArticles = false;
-    let hasJournal = false;
-    for (const p of relPaths) {
-      if (p.startsWith("articles/")) hasArticles = true;
-      if (p.startsWith("journal/")) hasJournal = true;
+    for (const prefix of ["", ".canon/"]) {
+      let hasArticles = false;
+      let hasJournal = false;
+      for (const p of relPaths) {
+        if (p.startsWith(prefix + "articles/")) hasArticles = true;
+        if (p.startsWith(prefix + "journal/")) hasJournal = true;
+      }
+      if (hasArticles && hasJournal) {
+        if (!prefix) return PI_CANON_PRESET;
+        return Object.assign({}, PI_CANON_PRESET, {
+          collections: PI_CANON_PRESET.collections.map((c) =>
+            Object.assign({}, c, { match: prefix + c.match })),
+        });
+      }
     }
-    return hasArticles && hasJournal ? PI_CANON_PRESET : DEFAULT_CONFIG;
+    return DEFAULT_CONFIG;
   }
 
   /* Optional embedding vectors: a parsed JSON object of root-relative markdown
@@ -224,6 +233,124 @@ var AtlasPipeline = (function () {
     return m ? m[1].trim() : "";
   }
 
+  /* ── article schema ────────────────────────────────────────────────────────
+     A store may carry a schema.json beside its collections: pi-canon writes one
+     when it creates a store, and this file is the shared contract, so the atlas
+     enforces the same rules at its own write doors. The shape mirrors pi-canon
+     exactly: an "article" object with capsule / title / body rules, each rule
+     taking required, min_chars, max_chars, hint. Enforcement is asymmetric on
+     purpose: required rejects a save that touches the field (and everything on
+     create), everything else warns, and a document read in violation carries
+     heal notes instead of errors. A malformed file fails open and loud: nothing
+     is enforced and the problems say so, because a contract the owner believes
+     is enforced while a typo disabled it is the worst state. */
+
+  const SCHEMA_FILE = "schema.json";
+  const SCHEMA_FIELDS = ["capsule", "title", "body"];
+  const SCHEMA_RULE_KEYS = ["required", "min_chars", "max_chars", "hint"];
+
+  /* The store lives either at the corpus root or nested under .canon/; the
+     schema file sits beside the collections, wherever they are. */
+  function schemaPrefix(config) {
+    return config.collections.some((c) => (c.match || "").startsWith(".canon/")) ? ".canon/" : "";
+  }
+
+  /* Raw file text (or null when absent) into { schema, problems }. */
+  function parseSchema(text) {
+    if (text == null) return { schema: undefined, problems: [] };
+    let raw;
+    try {
+      raw = JSON.parse(text);
+    } catch (e) {
+      return {
+        schema: undefined,
+        problems: [SCHEMA_FILE + " is not valid JSON (" + e.message + "); its rules are not being enforced."],
+      };
+    }
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return { schema: undefined, problems: [SCHEMA_FILE + " must hold a JSON object; its rules are not being enforced."] };
+    }
+    const problems = [];
+    const declared = raw.article;
+    if (declared === undefined) return { schema: {}, problems };
+    if (typeof declared !== "object" || declared === null || Array.isArray(declared)) {
+      return { schema: undefined, problems: [SCHEMA_FILE + ': "article" must be an object; its rules are not being enforced.'] };
+    }
+    const schema = {};
+    for (const [name, value] of Object.entries(declared)) {
+      if (!SCHEMA_FIELDS.includes(name)) {
+        problems.push(SCHEMA_FILE + ': unknown article field "' + name + '" is ignored (fields: ' + SCHEMA_FIELDS.join(", ") + ").");
+        continue;
+      }
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        problems.push(SCHEMA_FILE + ': rule for "' + name + '" must be an object and is ignored.');
+        continue;
+      }
+      const rule = {};
+      for (const [key, val] of Object.entries(value)) {
+        if (!SCHEMA_RULE_KEYS.includes(key)) {
+          problems.push(SCHEMA_FILE + ': unknown rule key "' + name + "." + key + '" is ignored (keys: ' + SCHEMA_RULE_KEYS.join(", ") + ").");
+        } else if (key === "required" && typeof val === "boolean") rule.required = val;
+        else if ((key === "min_chars" || key === "max_chars") && typeof val === "number" && Number.isInteger(val) && val >= 0) rule[key] = val;
+        else if (key === "hint" && typeof val === "string") rule.hint = val;
+        else problems.push(SCHEMA_FILE + ': "' + name + "." + key + '" has the wrong type and is ignored.');
+      }
+      schema[name] = rule;
+    }
+    return { schema, problems };
+  }
+
+  /* The title the schema means: the body's leading # heading, nothing later. */
+  function titleOf(body) {
+    for (const line of body.split("\n")) {
+      if (!line.trim()) continue;
+      const m = /^#\s+(.+)$/.exec(line);
+      return m ? m[1].trim() : "";
+    }
+    return "";
+  }
+
+  /* One save (or one read, when prevRaw === raw so nothing counts as touched)
+     against the schema. summaryKey is the frontmatter key this collection
+     carries its capsule under. A required violation rejects only when the save
+     touched that field or created the document; a legacy violation the save
+     left alone warns instead, so a body edit is never held hostage to an old
+     missing capsule. */
+  function checkDoc(raw, prevRaw, schema, summaryKey) {
+    const rejects = [];
+    const warns = [];
+    if (!schema) return { rejects, warns };
+    const created = prevRaw == null;
+    const extract = (text) => {
+      const { meta, body } = parseFrontmatter(text);
+      return {
+        capsule: String(meta[summaryKey] || "").trim(),
+        title: titleOf(body),
+        body: body.trim(),
+      };
+    };
+    const now = extract(raw);
+    const before = created ? null : extract(prevRaw);
+    for (const name of SCHEMA_FIELDS) {
+      const rule = schema[name];
+      if (!rule) continue;
+      const value = now[name];
+      const touched = created || value !== before[name];
+      const hint = rule.hint ? " (" + rule.hint + ")" : "";
+      if (rule.required && !value) {
+        if (touched) rejects.push(name + " is required" + hint);
+        else warns.push("schema: " + name + " is required and missing; this document can be healed by editing" + hint);
+      }
+      if (value && rule.min_chars != null && value.length < rule.min_chars) {
+        warns.push("schema: " + name + " is under " + rule.min_chars + " characters" + hint);
+      }
+      if (value && rule.max_chars != null && value.length > rule.max_chars) {
+        warns.push("schema: " + name + " is over " + rule.max_chars + " characters (" + value.length + ")" + hint);
+      }
+    }
+    return { rejects, warns };
+  }
+
   function extractLinks(body) {
     const out = [];
     // Fenced code carries example links that were never authored as references.
@@ -265,7 +392,14 @@ var AtlasPipeline = (function () {
     const allTags = asTags(meta[f.tags]);
     const lift = config.preset === "pi-canon";
     const fromPath = lift ? allTags.filter((t) => t.startsWith("path:")) : [];
+    /* A read never rejects: a document in violation carries heal notes. */
+    let schemaNotes;
+    if (config.schema && !col.immutable) {
+      const w = checkDoc(text, text, config.schema, f.summary).warns;
+      if (w.length) schemaNotes = w;
+    }
     return {
+      schemaNotes,
       path: rel,
       address,
       collection: col.name,
@@ -787,6 +921,7 @@ var AtlasPipeline = (function () {
       preset: config.preset,
       mode,
       basis,
+      schemaProblems: config.schemaProblems && config.schemaProblems.length ? config.schemaProblems : undefined,
       collections: config.collections.map((c) => ({
         name: c.name,
         match: c.match,
@@ -811,6 +946,7 @@ var AtlasPipeline = (function () {
         exists: n.exists,
         degree: n.degree,
         rank: n.rank,
+        schemaNotes: n.schemaNotes,
         html: n.body ? renderMarkdown(n.body) : "",
       })),
       edges,
@@ -832,6 +968,13 @@ var AtlasPipeline = (function () {
     const raw = composeConfig(opts.configJson, () => detectPreset(md.map((f) => f.path)));
     const config = buildConfig(raw);
     config.vectors = parseVectors(opts.vectorsJson);
+    /* schemaTexts carries both candidate files ({ root, nested }); which one is
+       the store's contract depends on where the collections landed, so the
+       choice waits for the config. */
+    const texts = opts.schemaTexts || {};
+    const s = parseSchema((schemaPrefix(config) ? texts.nested : texts.root) ?? null);
+    config.schema = s.schema;
+    config.schemaProblems = s.problems;
     const docs = scanFiles(md, config);
     const graph = buildGraph(docs);
     return buildData(config, graph, opts.mode || "fs");
@@ -839,12 +982,16 @@ var AtlasPipeline = (function () {
 
   return {
     CONFIG_NAME,
+    SCHEMA_FILE,
     PI_CANON_PRESET,
     DEFAULT_CONFIG,
     buildConfig,
     composeConfig,
     detectPreset,
     parseVectors,
+    parseSchema,
+    schemaPrefix,
+    checkDoc,
     collectionFor,
     parseFrontmatter,
     extractLinks,

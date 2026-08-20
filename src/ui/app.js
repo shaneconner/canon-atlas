@@ -554,6 +554,11 @@
         none: "No clusters yet: add links between documents, or provide embeddings, and regions will form.",
       }[data.basis];
       ov.appendChild(el("p", "side-meta", basisLine + " Select a cluster to isolate it, or any node to read it."));
+      /* A schema the owner believes is enforced while a typo disabled it is
+         the worst state, so declaration problems surface here, loud. */
+      if (data.schemaProblems && data.schemaProblems.length) {
+        ov.appendChild(el("p", "err", data.schemaProblems.join("\n")));
+      }
       data.collections.forEach(function (c) {
         if (state.mode[c.name] === "off" && c.count) {
           ov.appendChild(el("p", "side-meta",
@@ -779,6 +784,11 @@
       }
       var kind = n.exists ? n.collection + (n.immutable ? ", immutable" : "") : "unwritten reference";
       side.appendChild(el("p", "side-kind", kind));
+      /* A document in violation of the store's schema reads fine; the notes
+         say what an edit would heal. */
+      if (n.schemaNotes && n.schemaNotes.length) {
+        side.appendChild(el("p", "schema-note", n.schemaNotes.join("\n")));
+      }
       var t = el("p", "side-title", n.title);
       if (n.exists) t.style.color = d3.hcl(d3.color(n.color)).brighter(1.1) + "";
       side.appendChild(t);
@@ -862,6 +872,9 @@
     }
 
     function showErr(err) {
+      /* Replace any standing error: a corrected retry must not stack lines. */
+      var old = side.querySelector(".err");
+      if (old) old.parentNode.removeChild(old);
       var p = el("p", "err", String((err && err.message) || err));
       side.insertBefore(p, side.firstChild);
     }

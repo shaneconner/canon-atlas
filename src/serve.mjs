@@ -26,10 +26,13 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { createRequire } from "node:module";
 import { loadConfig, loadVectors, collectionFor } from "./config.mjs";
 import { scanCorpus } from "./scan.mjs";
 import { buildGraph } from "./graph.mjs";
 import { buildData, renderPage, renderAppPage } from "./page.mjs";
+
+const P = createRequire(import.meta.url)("./ui/pipeline.cjs");
 
 const CACHE_TTL_MS = 3000;
 const BODY_LIMIT = 4_000_000;
@@ -149,6 +152,22 @@ export function corpusApi(rootArg) {
     return { full, rel: norm, col };
   }
 
+  /* The store's schema, enforced at this door the way pi-canon enforces it at
+     its own: a required violation the save touched (or a create) rejects with
+     nothing written, so the client keeps the text and says what to correct;
+     everything else comes back as warnings beside the success. */
+  function schemaGate(content, prevRaw, col) {
+    const cfg = config();
+    if (col.immutable) return [];
+    /* A broken declaration enforces nothing, but every write says so. */
+    if (!cfg.schema) return cfg.schemaProblems || [];
+    const r = P.checkDoc(String(content ?? ""), prevRaw, cfg.schema, col.fields.summary);
+    if (r.rejects.length) {
+      throw httpError(422, "Write rejected by this store's schema.json:\n- " + r.rejects.join("\n- "));
+    }
+    return r.warns.concat(cfg.schemaProblems || []);
+  }
+
   /* Serve one API request whose path inside the API is sub ("/graph",
      "/doc"). Returns true when the route was taken; errors throw httpError
      for the caller's catch, so both hosts report them the same way. */
@@ -169,12 +188,13 @@ export function corpusApi(rootArg) {
       if (req.method === "POST") {
         guardMutation(req);
         const body = await readBody(req);
-        const { full, rel } = confine(body.path);
+        const { full, rel, col } = confine(body.path);
         if (existsSync(full)) throw httpError(409, "document already exists");
+        const warnings = schemaGate(body.content, null, col);
         mkdirSync(dirname(full), { recursive: true });
         writeFileSync(full, String(body.content ?? ""), { flag: "wx" });
         bust();
-        send(201, { path: rel });
+        send(201, warnings.length ? { path: rel, warnings } : { path: rel });
         return true;
       }
       if (req.method === "PUT") {
@@ -183,9 +203,10 @@ export function corpusApi(rootArg) {
         const { full, rel, col } = confine(body.path);
         if (col.immutable) throw httpError(403, `${col.name} is immutable`);
         if (!existsSync(full)) throw httpError(404, "no such document");
+        const warnings = schemaGate(body.content, readFileSync(full, "utf8"), col);
         atomicWrite(full, String(body.content ?? ""));
         bust();
-        send(200, { path: rel });
+        send(200, warnings.length ? { path: rel, warnings } : { path: rel });
         return true;
       }
       if (req.method === "DELETE") {

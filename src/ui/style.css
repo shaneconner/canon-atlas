@@ -555,4 +555,7 @@ select.abtn option { background: var(--bg-elevated); color: var(--text); }
 
 .abtn.danger:hover { border-color: #8b2942; color: #e08a9c; }
 
-.err { margin: 0.5rem 0; font-size: 0.75rem; color: #e08a9c; }
+.err { margin: 0.5rem 0; font-size: 0.75rem; color: #e08a9c; white-space: pre-line; }
+
+/* Schema heal notes: information beside a document, never a wall. */
+.schema-note { margin: 0.35rem 0 0.6rem; font-size: 0.72rem; color: #a89a5f; white-space: pre-line; }

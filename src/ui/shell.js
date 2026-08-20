@@ -193,9 +193,28 @@
       .catch(function () { return null; });
   }
 
+  /* Raw text at a nested path under the handle, or null when absent. */
+  function readTextAt(parts) {
+    var dir = Promise.resolve(handle);
+    for (var i = 0; i < parts.length - 1; i++) {
+      (function (name) {
+        dir = dir.then(function (d) { return d.getDirectoryHandle(name); });
+      })(parts[i]);
+    }
+    return dir
+      .then(function (d) { return d.getFileHandle(parts[parts.length - 1]); })
+      .then(function (fh) { return fh.getFile(); })
+      .then(function (f) { return f.text(); })
+      .catch(function () { return null; });
+  }
+
   /* "fs" when the handle came with write permission, "browse" when it is
      read-only (a dropped folder whose write grant was declined still reads). */
   var handleMode = "fs";
+
+  /* The store's article contract, parsed after each mount so the write path
+     enforces the same rules the wire data's heal notes report. */
+  var storeSchema = { schema: undefined, problems: [] };
 
   function buildFromFolder(progress) {
     return listDir(handle, "", [])
@@ -206,12 +225,20 @@
       .then(function (files) {
         return readJson(CONFIG).then(function (configJson) {
           var vecName = (configJson && configJson.embeddings) || "embeddings.json";
-          return readJson(vecName).then(function (vectorsJson) {
+          return Promise.all([
+            readJson(vecName),
+            readTextAt(["schema.json"]),
+            readTextAt([".canon", "schema.json"]),
+          ]).then(function (loaded) {
+            var schemaTexts = { root: loaded[1], nested: loaded[2] };
             currentData = AtlasPipeline.buildWireData(files, {
               configJson: configJson,
-              vectorsJson: vectorsJson,
+              vectorsJson: loaded[0],
+              schemaTexts: schemaTexts,
               mode: handleMode,
             });
+            var nested = currentData.collections.some(function (c) { return (c.match || "").indexOf(".canon/") === 0; });
+            storeSchema = AtlasPipeline.parseSchema(nested ? schemaTexts.nested : schemaTexts.root);
             return currentData;
           });
         });
@@ -252,6 +279,21 @@
     });
   }
 
+  /* The same asymmetric enforcement the server applies: a required violation
+     the save touched (or a create) rejects with nothing written, so the editor
+     keeps the text and says what to correct; everything else is a warning. */
+  function schemaGateFs(content, prevRaw, col) {
+    if (col.immutable) return [];
+    /* A broken declaration enforces nothing, but every write says so. */
+    if (!storeSchema.schema) return storeSchema.problems || [];
+    var summaryKey = (col.fields && col.fields.summary) || "summary";
+    var r = AtlasPipeline.checkDoc(String(content == null ? "" : content), prevRaw, storeSchema.schema, summaryKey);
+    if (r.rejects.length) {
+      throw new Error("Write rejected by this store's schema.json:\n- " + r.rejects.join("\n- "));
+    }
+    return r.warns.concat(storeSchema.problems);
+  }
+
   var fsBackend = {
     graph: function () { return buildFromFolder(); },
     readDoc: function (path) {
@@ -264,18 +306,25 @@
     writeDoc: function (path, content) {
       var col = confine(path);
       if (col.immutable) return Promise.reject(new Error(col.name + " is immutable"));
-      return fileHandleFor(path, false).then(function (fh) { return writeThrough(fh, content); }).then(function () {
-        return { path: path };
-      });
+      return fileHandleFor(path, false)
+        .then(function (fh) {
+          return fh.getFile().then(function (f) { return f.text(); }).then(function (prev) {
+            var warnings = schemaGateFs(content, prev, col);
+            return writeThrough(fh, content).then(function () {
+              return warnings.length ? { path: path, warnings: warnings } : { path: path };
+            });
+          });
+        });
     },
     createDoc: function (path, content) {
-      confine(path);
+      var col = confine(path);
       // Refuse to overwrite: succeed only if the file does not already exist.
       return fileHandleFor(path, false).then(
         function () { throw new Error("document already exists"); },
         function () {
+          var warnings = schemaGateFs(content, null, col);
           return fileHandleFor(path, true).then(function (fh) { return writeThrough(fh, content); }).then(function () {
-            return { path: path };
+            return warnings.length ? { path: path, warnings: warnings } : { path: path };
           });
         }
       );
@@ -361,9 +410,15 @@
           ).then(function (docs) {
             var mem = {};
             docs.forEach(function (f) { mem[f.path] = f.text; });
-            var data = AtlasPipeline.buildWireData(docs, {
+            return Promise.all([textOf("schema.json"), textOf(".canon/schema.json")]).then(function (st) {
+              return { docs: docs, mem: mem, schemaTexts: { root: st[0], nested: st[1] } };
+            });
+          }).then(function (got) {
+            var mem = got.mem;
+            var data = AtlasPipeline.buildWireData(got.docs, {
               configJson: configJson,
               vectorsJson: vectorsJson,
+              schemaTexts: got.schemaTexts,
               mode: "browse",
             });
             currentData = data;

@@ -334,6 +334,82 @@ function corpus(name, files) {
 }
 
 {
+  // Relations rules: the graph in the contract, judged where the graph lives.
+  // refs holds at the write door with the same touched asymmetry as the field
+  // rules; orphan and unlisted children become read-side heal notes, and the
+  // journal is never in scope.
+  const schemaFile = JSON.stringify({
+    schema_version: 1,
+    relations: {
+      refs: { required: true, hint: "name what this concerns" },
+      orphan: { warn: true },
+      children: { listed: true },
+    },
+  });
+  const docs = {
+    "articles/hub.md": "# Hub\nSee [[hub/left]].\n",
+    "articles/hub/left.md": "# Left\nBack to [[hub]].\n",
+    "articles/hub/right.md": "# Right\nAlso cites [[hub]].\n",
+    "articles/island.md": "# Island\nCites [[hub]].\n",
+    "journal/2026-08-19-e.md": "---\nsubject: [hub]\n---\nEvent.\n",
+  };
+  const root = corpus("relschema", { ...docs, "schema.json": schemaFile });
+  const config = loadConfig(root);
+  config.vectors = null;
+  const data = buildData(config, buildGraph(scanCorpus(root, config)), "live");
+  const at = (p) => data.nodes.find((n) => n.path === p);
+  assert.ok(at("articles/hub.md").schemaNotes.some((w) => w.includes("children not referenced: hub/right")));
+  assert.ok(!at("articles/hub.md").schemaNotes.some((w) => w.includes("nothing references")));
+  assert.ok(at("articles/island.md").schemaNotes.some((w) => w.includes("nothing references this document")));
+  assert.equal(at("articles/hub/left.md").schemaNotes, undefined, "a cited, citing, childless document is silent");
+  assert.equal(at("journal/2026-08-19-e.md").schemaNotes, undefined, "the journal is out of scope");
+  const wire = pipeline.buildWireData(
+    Object.entries(docs).map(([path, text]) => ({ path, text })),
+    { configJson: null, vectorsJson: null, schemaTexts: { root: schemaFile, nested: null }, mode: "live" }
+  );
+  assert.equal(JSON.stringify(wire), JSON.stringify(data), "browser and Node must agree on relations notes byte for byte");
+  pass("orphan and unlisted children carry heal notes, identically from Node and the browser");
+
+  // Counting is honest: code examples and case-folded duplicates are not citations.
+  const counted = pipeline.checkDoc(
+    "# X\nSee [[real/target]] and `[[not/a/ref]]` and\n```\n[[also/not]]\n```\nand [[REAL/TARGET|again]].\n",
+    null,
+    { relations: { refs: { min_count: 2 } } },
+    {}
+  );
+  assert.deepEqual(counted.rejects, []);
+  assert.ok(counted.warns.some((w) => w.includes("refs has 1 outgoing (min 2)")));
+  const relTypod = pipeline.parseSchema(JSON.stringify({ relations: { refs: { min: 1 }, parents: {} } }));
+  assert.ok(relTypod.problems.some((p) => p.includes('unknown rule key "relations.refs.min"')));
+  assert.ok(relTypod.problems.some((p) => p.includes('unknown relations field "parents"')));
+  pass("citations count once with code stripped, and relations typos are named");
+
+  const { server, port } = await serve(root, 0);
+  const base = `http://127.0.0.1:${port}`;
+  const jsonReq = (method, body) => ({
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let res = await fetch(base + "/api/doc", jsonReq("POST", { path: "articles/new.md", content: "# New\nCites nothing.\n" }));
+  assert.equal(res.status, 422);
+  assert.ok((await res.json()).error.includes("refs is required and this document references nothing (name what this concerns)"));
+  assert.ok(!existsSync(join(root, "articles/new.md")));
+  res = await fetch(base + "/api/doc", jsonReq("POST", { path: "articles/new.md", content: "# New\nSee [[hub]].\n" }));
+  assert.equal(res.status, 201);
+  // A legacy citation-less document: a body edit that keeps the empty set warns...
+  writeFileSync(join(root, "articles/legacy.md"), "# Legacy\nCites nothing.\n");
+  res = await fetch(base + "/api/doc", jsonReq("PUT", { path: "articles/legacy.md", content: "# Legacy\nEdited, still cites nothing.\n" }));
+  assert.equal(res.status, 200);
+  assert.ok((await res.json()).warnings.some((w) => w.includes("refs is required and this document references nothing")));
+  // ...and only the edit that empties a reference set rejects.
+  res = await fetch(base + "/api/doc", jsonReq("PUT", { path: "articles/island.md", content: "# Island\nCitations deleted.\n" }));
+  assert.equal(res.status, 422);
+  server.close();
+  pass("the refs rule holds at the write door: creation and removal reject, a kept empty set warns");
+}
+
+{
   const root = corpus("pathtags", {
     "articles/a.md": '---\ncapsule: "A."\nlegacy-tags: [wiki, "path:pi-canon/x"]\n---\nSee [[b]].\n',
     "articles/b.md": '---\nlegacy-tags: [wiki, "path:pi-canon/x"]\n---\n# B\nBack to [[a]].\n',

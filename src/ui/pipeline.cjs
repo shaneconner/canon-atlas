@@ -248,6 +248,15 @@ var AtlasPipeline = (function () {
   const SCHEMA_FILE = "schema.json";
   const SCHEMA_FIELDS = ["capsule", "title", "body"];
   const SCHEMA_RULE_KEYS = ["required", "min_chars", "max_chars", "hint"];
+  /* Relations rules are about the reference graph, not any one field. The
+     contract declares them once; each tool enforces what it can see. This
+     page sees the whole graph, so all three hold here: refs at the write
+     door and on read, orphan and children as read-side heal notes. */
+  const RELATION_KEYS = {
+    refs: ["required", "min_count", "hint"],
+    orphan: ["warn", "hint"],
+    children: ["listed", "hint"],
+  };
 
   /* The store lives either at the corpus root or nested under .canon/; the
      schema file sits beside the collections, wherever they are. */
@@ -271,8 +280,9 @@ var AtlasPipeline = (function () {
       return { schema: undefined, problems: [SCHEMA_FILE + " must hold a JSON object; its rules are not being enforced."] };
     }
     const problems = [];
-    const declared = raw.article;
-    if (declared === undefined) return { schema: {}, problems };
+    /* A missing article block is an empty one, not an early exit: a schema
+       may carry only relations rules. */
+    const declared = raw.article ?? {};
     if (typeof declared !== "object" || declared === null || Array.isArray(declared)) {
       return { schema: undefined, problems: [SCHEMA_FILE + ': "article" must be an object; its rules are not being enforced.'] };
     }
@@ -297,7 +307,49 @@ var AtlasPipeline = (function () {
       }
       schema[name] = rule;
     }
+    const rel = raw.relations;
+    if (rel !== undefined) {
+      if (typeof rel !== "object" || rel === null || Array.isArray(rel)) {
+        problems.push(SCHEMA_FILE + ': "relations" must be an object and is ignored.');
+      } else {
+        const relations = {};
+        for (const [name, value] of Object.entries(rel)) {
+          const keys = RELATION_KEYS[name];
+          if (!keys) {
+            problems.push(SCHEMA_FILE + ': unknown relations field "' + name + '" is ignored (fields: refs, orphan, children).');
+            continue;
+          }
+          if (typeof value !== "object" || value === null || Array.isArray(value)) {
+            problems.push(SCHEMA_FILE + ': rule for "relations.' + name + '" must be an object and is ignored.');
+            continue;
+          }
+          const rule = {};
+          for (const [key, val] of Object.entries(value)) {
+            if (!keys.includes(key)) {
+              problems.push(SCHEMA_FILE + ': unknown rule key "relations.' + name + "." + key + '" is ignored (keys: ' + keys.join(", ") + ").");
+            } else if ((key === "required" || key === "warn" || key === "listed") && typeof val === "boolean") rule[key] = val;
+            else if (key === "min_count" && typeof val === "number" && Number.isInteger(val) && val >= 0) rule[key] = val;
+            else if (key === "hint" && typeof val === "string") rule.hint = val;
+            else problems.push(SCHEMA_FILE + ': "relations.' + name + "." + key + '" has the wrong type and is ignored.');
+          }
+          relations[name] = rule;
+        }
+        schema.relations = relations;
+      }
+    }
     return { schema, problems };
+  }
+
+  /* The outgoing references a document authors, as the write door can see them:
+     body links (code stripped by the extractor) plus the collection's refs
+     frontmatter, deduplicated case-insensitively. */
+  function outgoingOf(raw, refsKey) {
+    const { meta, body } = parseFrontmatter(raw);
+    const out = new Set();
+    for (const l of extractLinks(body)) out.add(l.target.trim().toLowerCase());
+    for (const r of asRefs(meta[refsKey])) out.add(String(r).trim().toLowerCase());
+    out.delete("");
+    return [...out].sort();
   }
 
   /* The title the schema means: the body's leading # heading, nothing later. */
@@ -311,15 +363,19 @@ var AtlasPipeline = (function () {
   }
 
   /* One save (or one read, when prevRaw === raw so nothing counts as touched)
-     against the schema. summaryKey is the frontmatter key this collection
-     carries its capsule under. A required violation rejects only when the save
-     touched that field or created the document; a legacy violation the save
-     left alone warns instead, so a body edit is never held hostage to an old
-     missing capsule. */
-  function checkDoc(raw, prevRaw, schema, summaryKey) {
+     against the schema. fields is the collection's frontmatter mapping (a bare
+     string is taken as the summary key, for callers predating relations). A
+     required violation rejects only when the save touched that field or
+     created the document; a legacy violation the save left alone warns
+     instead, so a body edit is never held hostage to an old missing capsule,
+     and a kept reference set is never re-litigated. */
+  function checkDoc(raw, prevRaw, schema, fields) {
     const rejects = [];
     const warns = [];
     if (!schema) return { rejects, warns };
+    const f = typeof fields === "string" ? { summary: fields } : fields || {};
+    const summaryKey = f.summary || "summary";
+    const refsKey = f.refs || "refs";
     const created = prevRaw == null;
     const extract = (text) => {
       const { meta, body } = parseFrontmatter(text);
@@ -346,6 +402,20 @@ var AtlasPipeline = (function () {
       }
       if (value && rule.max_chars != null && value.length > rule.max_chars) {
         warns.push("schema: " + name + " is over " + rule.max_chars + " characters (" + value.length + ")" + hint);
+      }
+    }
+    /* refs is judged from the save alone: touched means the reference SET
+       changed, so a body edit that keeps its citations passes untouched. */
+    const refsRule = schema.relations && schema.relations.refs;
+    if (refsRule) {
+      const cited = outgoingOf(raw, refsKey);
+      const touched = created || cited.join("\n") !== outgoingOf(prevRaw, refsKey).join("\n");
+      const hint = refsRule.hint ? " (" + refsRule.hint + ")" : "";
+      if (refsRule.required && cited.length === 0) {
+        if (touched) rejects.push("refs is required and this document references nothing" + hint);
+        else warns.push("schema: refs is required and this document references nothing; this document can be healed by editing" + hint);
+      } else if (refsRule.min_count != null && cited.length < refsRule.min_count) {
+        warns.push("schema: refs has " + cited.length + " outgoing (min " + refsRule.min_count + ")" + hint);
       }
     }
     return { rejects, warns };
@@ -395,7 +465,7 @@ var AtlasPipeline = (function () {
     /* A read never rejects: a document in violation carries heal notes. */
     let schemaNotes;
     if (config.schema && !col.immutable) {
-      const w = checkDoc(text, text, config.schema, f.summary).warns;
+      const w = checkDoc(text, text, config.schema, f).warns;
       if (w.length) schemaNotes = w;
     }
     return {
@@ -911,6 +981,46 @@ var AtlasPipeline = (function () {
 
   function buildData(config, graph, mode) {
     const { nodes, edges } = graph;
+    /* The graph-wide relations rules, which only a whole-graph reader can
+       judge: orphan (nothing references this document) and children (a parent
+       must reference each direct child under its address). Read-side heal
+       notes, never a wall, and only over mutable documents. */
+    const rel = config.schema && config.schema.relations;
+    if (rel && ((rel.orphan && rel.orphan.warn) || (rel.children && rel.children.listed))) {
+      const inbound = new Set();
+      const outTargets = new Map();
+      for (const e of edges) {
+        inbound.add(e.target);
+        if (!outTargets.has(e.source)) outTargets.set(e.source, new Set());
+        outTargets.get(e.source).add(e.target);
+      }
+      const byAddress = new Map();
+      nodes.forEach((n, i) => {
+        if (n.exists && !n.immutable && n.address) byAddress.set(n.address, i);
+      });
+      nodes.forEach((n, i) => {
+        if (!n.exists || n.immutable) return;
+        const notes = [];
+        if (rel.orphan && rel.orphan.warn && !inbound.has(i)) {
+          notes.push("schema: nothing references this document" + (rel.orphan.hint ? " (" + rel.orphan.hint + ")" : ""));
+        }
+        if (rel.children && rel.children.listed && n.address) {
+          const prefix = n.address + "/";
+          const named = outTargets.get(i) || new Set();
+          const missing = [];
+          for (const [addr, ci] of byAddress) {
+            if (!addr.startsWith(prefix) || addr.slice(prefix.length).includes("/")) continue;
+            if (!named.has(ci)) missing.push(addr);
+          }
+          if (missing.length) {
+            missing.sort();
+            const shown = missing.slice(0, 3).join(", ") + (missing.length > 3 ? " and " + (missing.length - 3) + " more" : "");
+            notes.push("schema: children not referenced: " + shown + (rel.children.hint ? " (" + rel.children.hint + ")" : ""));
+          }
+        }
+        if (notes.length) n.schemaNotes = (n.schemaNotes || []).concat(notes);
+      });
+    }
     const { basis, clusters, assign } = assignClusters(nodes, edges, config.vectors || null);
     const counts = new Map();
     for (const n of nodes) {

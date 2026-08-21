@@ -286,8 +286,7 @@
     if (col.immutable) return [];
     /* A broken declaration enforces nothing, but every write says so. */
     if (!storeSchema.schema) return storeSchema.problems || [];
-    var summaryKey = (col.fields && col.fields.summary) || "summary";
-    var r = AtlasPipeline.checkDoc(String(content == null ? "" : content), prevRaw, storeSchema.schema, summaryKey);
+    var r = AtlasPipeline.checkDoc(String(content == null ? "" : content), prevRaw, storeSchema.schema, col.fields || {});
     if (r.rejects.length) {
       throw new Error("Write rejected by this store's schema.json:\n- " + r.rejects.join("\n- "));
     }

@@ -161,7 +161,7 @@ export function corpusApi(rootArg) {
     if (col.immutable) return [];
     /* A broken declaration enforces nothing, but every write says so. */
     if (!cfg.schema) return cfg.schemaProblems || [];
-    const r = P.checkDoc(String(content ?? ""), prevRaw, cfg.schema, col.fields.summary);
+    const r = P.checkDoc(String(content ?? ""), prevRaw, cfg.schema, col.fields);
     if (r.rejects.length) {
       throw httpError(422, "Write rejected by this store's schema.json:\n- " + r.rejects.join("\n- "));
     }
